@@ -96,6 +96,21 @@ function collectMissingRelativeImports(): MissingImport[] {
 }
 
 const args = process.argv.slice(2)
+
+// --dir: change working directory before scanning imports or booting
+const dirIdx = args.indexOf('--dir')
+if (dirIdx !== -1 && args[dirIdx + 1]) {
+  const targetDir = args[dirIdx + 1]!
+  try {
+    process.chdir(targetDir)
+  } catch (err) {
+    console.error(`Error: Failed to change directory to "${targetDir}": ${err}`)
+    process.exit(1)
+  }
+  // Remove --dir and its value from argv so downstream Commander.js doesn't complain
+  process.argv.splice(dirIdx + 2, 2)
+}
+
 const missingImports = collectMissingRelativeImports()
 
 if (args.includes('--version')) {

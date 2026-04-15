@@ -284,6 +284,19 @@ async function main(): Promise<void> {
     process.env.CLAUDE_CODE_SIMPLE = '1';
   }
 
+  // --dir: change working directory before loading the CLI
+  const dirIdx = args.indexOf('--dir')
+  if (dirIdx !== -1 && args[dirIdx + 1]) {
+    const targetDir = args[dirIdx + 1]!
+    try {
+      process.chdir(targetDir)
+    } catch (err) {
+      // biome-ignore lint/suspicious/noConsole: intentional console output
+      console.error(`Error: Failed to change directory to "${targetDir}": ${err}`)
+      process.exit(1)
+    }
+  }
+
   // No special flags detected, load and run the full CLI
   const {
     startCapturingEarlyInput
