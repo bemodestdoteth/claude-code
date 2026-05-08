@@ -3898,19 +3898,25 @@ async function run(): Promise<CommanderCommand> {
   // claude mcp
 
   const mcp = program.command('mcp').description('Configure and manage MCP servers').configureHelp(createSortedHelpConfig()).enablePositionalOptions();
-  mcp.command('serve').description(`Start the Claude Code MCP server`).option('-d, --debug', 'Enable debug mode', () => true).option('--verbose', 'Override verbose mode setting from config', () => true).action(async ({
+  mcp.command('serve').description(`Start the Claude Code MCP server`).option('-d, --debug', 'Enable debug mode', () => true).option('--verbose', 'Override verbose mode setting from config', () => true).option('-p, --port <port>', 'HTTP port for remote access (defaults to stdio if not specified)', (val: string) => parseInt(val, 10)).option('--host <host>', 'HTTP host to bind to (default: 0.0.0.0)', '0.0.0.0').action(async ({
     debug,
-    verbose
+    verbose,
+    port,
+    host
   }: {
     debug?: boolean;
     verbose?: boolean;
+    port?: number;
+    host?: string;
   }) => {
     const {
       mcpServeHandler
     } = await import('./cli/handlers/mcp.js');
     await mcpServeHandler({
       debug,
-      verbose
+      verbose,
+      port,
+      host
     });
   });
 

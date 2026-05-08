@@ -41,10 +41,14 @@ async function checkMcpServerHealth(name: string, server: ScopedMcpServerConfig)
 // mcp serve (lines 4512–4532)
 export async function mcpServeHandler({
   debug,
-  verbose
+  verbose,
+  port,
+  host
 }: {
   debug?: boolean;
   verbose?: boolean;
+  port?: number;
+  host?: string;
 }): Promise<void> {
   const providedCwd = cwd();
   logEvent('tengu_mcp_start', {});
@@ -57,6 +61,9 @@ export async function mcpServeHandler({
     throw error;
   }
   try {
+    // Enable config reading before setup (required for config access)
+    const { enableConfigs } = await import('../../utils/config.js');
+    enableConfigs();
     const {
       setup
     } = await import('../../setup.js');
@@ -64,7 +71,7 @@ export async function mcpServeHandler({
     const {
       startMCPServer
     } = await import('../../entrypoints/mcp.js');
-    await startMCPServer(providedCwd, debug ?? false, verbose ?? false);
+    await startMCPServer(providedCwd, debug ?? false, verbose ?? false, port, host);
   } catch (error) {
     cliError(`Error: Failed to start MCP server: ${error}`);
   }

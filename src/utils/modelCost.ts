@@ -86,12 +86,42 @@ export const COST_HAIKU_45 = {
   webSearchRequests: 0.01,
 } as const satisfies ModelCosts
 
-const DEFAULT_UNKNOWN_MODEL_COST = COST_TIER_5_25
+const DEFAULT_UNKNOWN_MODEL_COST = parseCostTierEnv(
+  process.env.CLAUDE_CODE_DEFAULT_COST_TIER,
+) ?? COST_TIER_5_25
+
+/**
+ * Parse a cost-tier override from an environment variable.
+ * Expected format: "input,output,cacheWrite,cacheRead,webSearch"
+ * All values are per-million-token prices in USD.
+ * Example: CLAUDE_CODE_DEFAULT_COST_TIER="5,25,6.25,0.5,0.01"
+ */
+function parseCostTierEnv(value: string | undefined): ModelCosts | undefined {
+  if (!value) return undefined
+  const parts = value.split(',').map(s => parseFloat(s.trim()))
+  if (parts.length !== 5 || parts.some(Number.isNaN)) return undefined
+  return {
+    inputTokens: parts[0]!,
+    outputTokens: parts[1]!,
+    promptCacheWriteTokens: parts[2]!,
+    promptCacheReadTokens: parts[3]!,
+    webSearchRequests: parts[4]!,
+  }
+}
+
+/**
+ * When true, every model uses the default cost tier instead of its
+ * own pricing. Useful for uniform cost estimation or testing.
+ */
+const FORCE_DEFAULT_COST = process.env.CLAUDE_CODE_FORCE_DEFAULT_COST === '1'
 
 /**
  * Get the cost tier for Opus 4.6 based on fast mode.
  */
 export function getOpus46CostTier(fastMode: boolean): ModelCosts {
+  if (FORCE_DEFAULT_COST) {
+    return DEFAULT_UNKNOWN_MODEL_COST
+  }
   if (isFastModeEnabled() && fastMode) {
     return COST_TIER_30_150
   }
@@ -142,6 +172,10 @@ function tokensToUSDCost(modelCosts: ModelCosts, usage: Usage): number {
 }
 
 export function getModelCosts(model: string, usage: Usage): ModelCosts {
+  if (FORCE_DEFAULT_COST) {
+    return DEFAULT_UNKNOWN_MODEL_COST
+  }
+
   const shortName = getCanonicalName(model)
 
   // Check if this is an Opus 4.6 model with fast mode active.
@@ -224,6 +258,9 @@ export function formatModelPricing(costs: ModelCosts): string {
  * Returns undefined if model is not found
  */
 export function getModelPricingString(model: string): string | undefined {
+  if (FORCE_DEFAULT_COST) {
+    return formatModelPricing(DEFAULT_UNKNOWN_MODEL_COST)
+  }
   const shortName = getCanonicalName(model)
   const costs = MODEL_COSTS[shortName]
   if (!costs) return undefined

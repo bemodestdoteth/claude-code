@@ -1,11 +1,15 @@
+import { randomUUID } from 'node:crypto'
+import { createServer } from 'node:http'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import {
   CallToolRequestSchema,
   type CallToolResult,
   ListToolsRequestSchema,
   type ListToolsResult,
   type Tool,
+  isInitializeRequest,
 } from '@modelcontextprotocol/sdk/types.js'
 import { getDefaultAppState } from 'src/state/AppStateStore.js'
 import review from '../commands/review.js'
@@ -19,6 +23,13 @@ import { getTools } from '../tools.js'
 import { createAbortController } from '../utils/abortController.js'
 import { createFileStateCacheWithSizeLimit } from '../utils/fileStateCache.js'
 import { logError } from '../utils/log.js'
+
+function logForDebugging(...args: unknown[]): void {
+  if (process.env.CLaude_CODE_DEBUG || process.argv.includes('--debug')) {
+    // biome-ignore lint/suspicious/noConsole: debug logging
+    console.error('[MCP Debug]', ...args)
+  }
+}
 import { createAssistantMessage } from '../utils/messages.js'
 import { getMainLoopModel } from '../utils/model/model.js'
 import { hasPermissionsToUseTool } from '../utils/permissions/permissions.js'
@@ -36,7 +47,12 @@ export async function startMCPServer(
   cwd: string,
   debug: boolean,
   verbose: boolean,
+  port?: number,
+  host?: string,
 ): Promise<void> {
+  // biome-ignore lint/suspicious/noConsole: startup logging
+  console.log(`[MCP] Starting server on ${host ?? '0.0.0.0'}:${port ?? 'stdio'}`)
+
   // Use size-limited LRU cache for readFileState to prevent unbounded memory growth
   // 100 files and 25MB limit should be sufficient for MCP server operations
   const READ_FILE_STATE_CACHE_SIZE = 100
@@ -47,7 +63,7 @@ export async function startMCPServer(
   const server = new Server(
     {
       name: 'claude/tengu',
-      version: MACRO.VERSION,
+      version: typeof MACRO !== 'undefined' ? MACRO.VERSION : 'dev',
     },
     {
       capabilities: {
@@ -188,8 +204,165 @@ export async function startMCPServer(
   )
 
   async function runServer() {
-    const transport = new StdioServerTransport()
-    await server.connect(transport)
+    // HTTP transport mode (for remote access via Tailscale, etc.)
+    if (port !== undefined) {
+      // Map to store transports by session ID for session management
+      const transports: Record<string, StreamableHTTPServerTransport> = {}
+
+      const httpServer = createServer(async (req, res) => {
+        // Enable CORS for cross-origin requests
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        res.setHeader('Access-Control-Allow-Methods', 'POST, GET, DELETE, OPTIONS')
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, mcp-session-id, last-event-id')
+
+        if (req.method === 'OPTIONS') {
+          res.writeHead(200)
+          res.end()
+          return
+        }
+
+        // Handle GET requests for SSE streams (resumability)
+        if (req.method === 'GET') {
+          const sessionId = req.headers['mcp-session-id'] as string | undefined
+          if (!sessionId || !transports[sessionId]) {
+            res.writeHead(400)
+            res.end('Invalid or missing session ID')
+            return
+          }
+          const transport = transports[sessionId]
+          await transport.handleRequest(req, res)
+          return
+        }
+
+        // Handle DELETE requests for session termination
+        if (req.method === 'DELETE') {
+          const sessionId = req.headers['mcp-session-id'] as string | undefined
+          if (!sessionId || !transports[sessionId]) {
+            res.writeHead(400)
+            res.end('Invalid or missing session ID')
+            return
+          }
+          const transport = transports[sessionId]
+          await transport.handleRequest(req, res)
+          return
+        }
+
+        if (req.method !== 'POST') {
+          res.writeHead(405)
+          res.end('Method not allowed')
+          return
+        }
+
+        // Parse request body
+        const chunks: Buffer[] = []
+        req.on('data', chunk => chunks.push(chunk))
+        req.on('end', async () => {
+          try {
+            const body = JSON.parse(Buffer.concat(chunks).toString())
+            const sessionId = req.headers['mcp-session-id'] as string | undefined
+
+            let transport: StreamableHTTPServerTransport
+
+            if (sessionId && transports[sessionId]) {
+              // Reuse existing transport for this session
+              transport = transports[sessionId]
+            } else if (!sessionId && isInitializeRequest(body)) {
+              // New initialization request - create a new session
+              transport = new StreamableHTTPServerTransport({
+                sessionIdGenerator: () => randomUUID(),
+                onsessioninitialized: (sid: string) => {
+                  // Store the transport by session ID when session is initialized
+                  // This avoids race conditions where requests might come in before the session is stored
+                  logForDebugging(`Session initialized with ID: ${sid}`)
+                  transports[sid] = transport
+                },
+              })
+
+              // Set up onclose handler to clean up transport when closed
+              transport.onclose = () => {
+                const sid = transport.sessionId
+                if (sid && transports[sid]) {
+                  logForDebugging(`Transport closed for session ${sid}, removing from transports map`)
+                  delete transports[sid]
+                }
+              }
+
+              // Connect the transport to the MCP server BEFORE handling the request
+              // so responses can flow back through the same transport
+              await server.connect(transport)
+              await transport.handleRequest(req, res, body)
+              return
+            } else {
+              // Invalid request - no session ID and not an initialization request
+              res.writeHead(400)
+              res.end(JSON.stringify({
+                jsonrpc: '2.0',
+                error: {
+                  code: -32000,
+                  message: 'Bad Request: No valid session ID provided'
+                },
+                id: null,
+              }))
+              return
+            }
+
+            // Handle the request with existing transport
+            // The existing transport is already connected to the server
+            await transport.handleRequest(req, res, body)
+          } catch (error) {
+            logForDebugging('Error handling MCP HTTP request:', error)
+            if (!res.headersSent) {
+              res.writeHead(500)
+              res.end(JSON.stringify({
+                jsonrpc: '2.0',
+                error: { code: -32603, message: 'Internal server error' },
+                id: null,
+              }))
+            }
+          }
+        })
+      })
+
+      const listenHost = host ?? '0.0.0.0'
+      // biome-ignore lint/suspicious/noConsole: debug
+      console.error(`[MCP HTTP] About to listen on ${listenHost}:${port}`)
+      httpServer.on('error', (err) => {
+        // biome-ignore lint/suspicious/noConsole: intentional error message
+        console.error(`[Claude MCP HTTP Server] Error: ${err.message}`)
+        process.exit(1)
+      })
+      httpServer.listen(port, listenHost, () => {
+        // biome-ignore lint/suspicious/noConsole: debug
+        console.error(`[MCP HTTP] In listen callback`)
+        logForDebugging(`[Claude MCP HTTP Server] Listening on http://${listenHost}:${port}`)
+        // biome-ignore lint/suspicious/noConsole: intentional startup message
+        console.log(`Claude Code MCP server listening on http://${listenHost}:${port}`)
+      })
+
+      // Handle server shutdown
+      process.on('SIGINT', async () => {
+        // biome-ignore lint/suspicious/noConsole: intentional shutdown message
+        console.log('\nShutting down MCP server...')
+        // Close all active transports to properly clean up resources
+        for (const sessionId in transports) {
+          try {
+            logForDebugging(`Closing transport for session ${sessionId}`)
+            await transports[sessionId].close()
+            delete transports[sessionId]
+          } catch (error) {
+            logForDebugging(`Error closing transport for session ${sessionId}:`, error)
+          }
+        }
+        process.exit(0)
+      })
+
+      // Keep the process alive
+      await new Promise(() => {})
+    } else {
+      // Stdio transport mode (default, for local use)
+      const transport = new StdioServerTransport()
+      await server.connect(transport)
+    }
   }
 
   return await runServer()
