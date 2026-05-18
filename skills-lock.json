@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "defense-in-depth-validation": {
+      "source": "secondsky/claude-skills",
+      "sourceType": "github",
+      "skillPath": "plugins/defense-in-depth-validation/skills/defense-in-depth-validation/SKILL.md",
+      "computedHash": "b914aba4c07d3a4d65f93e233db45057ea3d4eb581f1232e3233e9f91611a2d1"
+    },
     "find-skills": {
       "source": "vercel-labs/skills",
       "sourceType": "github",

@@ -12,7 +12,7 @@ import { Box, Text } from '../../ink.js';
 import { isChannelsEnabled } from '../../services/mcp/channelAllowlist.js';
 import { getEffectiveChannelAllowlist } from '../../services/mcp/channelNotification.js';
 import { getMcpConfigsByScope } from '../../services/mcp/config.js';
-import { getClaudeAIOAuthTokens, getSubscriptionType } from '../../utils/auth.js';
+import { getSubscriptionType } from '../../utils/auth.js';
 import { loadInstalledPluginsV2 } from '../../utils/plugins/installedPluginsManager.js';
 import { getSettingsForSource } from '../../utils/settings/settings.js';
 export function ChannelsNotice() {
@@ -21,7 +21,6 @@ export function ChannelsNotice() {
   const {
     channels,
     disabled,
-    noAuth,
     policyBlocked,
     list,
     unmatched
@@ -55,33 +54,6 @@ export function ChannelsNotice() {
       $[5] = t3;
     } else {
       t3 = $[5];
-    }
-    return t3;
-  }
-  if (noAuth) {
-    let t1;
-    if ($[6] !== flag || $[7] !== list) {
-      t1 = <Text color="error">{flag} ignored ({list})</Text>;
-      $[6] = flag;
-      $[7] = list;
-      $[8] = t1;
-    } else {
-      t1 = $[8];
-    }
-    let t2;
-    if ($[9] === Symbol.for("react.memo_cache_sentinel")) {
-      t2 = <Text dimColor={true}>Channels require claude.ai authentication · run /login, then restart</Text>;
-      $[9] = t2;
-    } else {
-      t2 = $[9];
-    }
-    let t3;
-    if ($[10] !== t1) {
-      t3 = <Box paddingLeft={2} flexDirection="column">{t1}{t2}</Box>;
-      $[10] = t1;
-      $[11] = t3;
-    } else {
-      t3 = $[11];
     }
     return t3;
   }
@@ -176,7 +148,6 @@ function _temp() {
     return {
       channels: ch,
       disabled: false,
-      noAuth: false,
       policyBlocked: false,
       list: "",
       unmatched: [] as Unmatched[]
@@ -190,7 +161,6 @@ function _temp() {
   return {
     channels: ch,
     disabled: !isChannelsEnabled(),
-    noAuth: !getClaudeAIOAuthTokens()?.accessToken,
     policyBlocked: managed && policy?.channelsEnabled !== true,
     list: l,
     unmatched: findUnmatched(ch, allowlist)

@@ -17,7 +17,9 @@
   "scripts": {
     "dev": "bun ./src/dev-entry.ts",
     "start": "bun run ./src/dev-entry.ts",
-    "version": "bun run ./src/dev-entry.ts --version"
+    "version": "bun run ./src/dev-entry.ts --version",
+    "plan:preview": "bun ./scripts/plan-preview.ts",
+    "plan:preview:docker": "docker compose up -d plan-preview"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "*",

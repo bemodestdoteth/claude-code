@@ -584,23 +584,22 @@ export function useManageMCPConnections(
                 if (
                   gate.kind !== 'capability' &&
                   gate.kind !== 'session' &&
+                  gate.kind !== 'auth' &&
                   !channelWarnedKindsRef.current.has(gate.kind) &&
                   (gate.kind === 'marketplace' ||
                     gate.kind === 'allowlist' ||
                     entry !== undefined)
                 ) {
                   channelWarnedKindsRef.current.add(gate.kind)
-                  // disabled/auth/policy get custom toast copy (shorter, actionable);
+                  // disabled/policy get custom toast copy (shorter, actionable);
                   // marketplace/allowlist reuse the gate's reason verbatim
                   // since it already names the mismatch.
                   const text =
                     gate.kind === 'disabled'
                       ? 'Channels are not currently available'
-                      : gate.kind === 'auth'
-                        ? 'Channels require claude.ai authentication · run /login'
-                        : gate.kind === 'policy'
-                          ? 'Channels are not enabled for your org · have an administrator set channelsEnabled: true in managed settings'
-                          : gate.reason
+                      : gate.kind === 'policy'
+                        ? 'Channels are not enabled for your org · have an administrator set channelsEnabled: true in managed settings'
+                        : gate.reason
                   addNotification({
                     key: `channels-blocked-${gate.kind}`,
                     priority: 'high',
