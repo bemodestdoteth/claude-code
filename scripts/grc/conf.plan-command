@@ -1,0 +1,19 @@
+# Command-output colour rules for generated plan previews.
+# Kept intentionally narrow: highlight common status, error, path, and command tokens.
+regexp=(\b(ERROR|Error|error|FAILED|Failed|failed|FAIL|Fail|fail)\b)
+colours=red,bold
+====
+regexp=(\b(WARN|Warn|warn|WARNING|Warning|warning)\b)
+colours=yellow,bold
+====
+regexp=(\b(PASS|Pass|pass|PASSED|Passed|passed|OK|Ok|ok|SUCCESS|Success|success)\b)
+colours=green,bold
+====
+regexp=(\b(INFO|Info|info|NOTE|Note|note)\b)
+colours=cyan
+====
+regexp=(^|\s)(bun|node|npm|pnpm|yarn|git|docker|pytest|python|python3|grcat)(\s|$)
+colours=unchanged,blue,unchanged
+====
+regexp=([./][A-Za-z0-9._/-]+)
+colours=magenta

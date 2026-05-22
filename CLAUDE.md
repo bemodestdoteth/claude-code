@@ -6,6 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Reconstructed TypeScript source tree of the Claude Code CLI, recovered from source maps of the public npm release. Some native modules are replaced with compatible shims in `shims/`. This is **not** the upstream Anthropic development repo.
 
+## AI collaboration protocol
+- Read at least 5 relevant files before modifying code.
+- Always read mentioned files before answering about them.
+- Do not answer based on guesses; if unsure, verify with tools.
+- Design first in Plan Mode before implementation.
+- Make one logical change at a time; do not bundle unrelated changes.
+- Validate every code change with AST syntax check, test execution, or log verification.
+- Make data-driven decisions; when adjusting parameters, extract actual numbers from DB, APIs, or logs first.
+- Do not skip reading, planning, or validation for speed.
+
 ## Development Commands
 
 ```bash

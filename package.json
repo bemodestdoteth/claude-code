@@ -18,7 +18,11 @@
     "dev": "bun ./src/dev-entry.ts",
     "start": "bun run ./src/dev-entry.ts",
     "version": "bun run ./src/dev-entry.ts --version",
+    "memory:distill": "bun run scripts/obsidian-memory-distill.ts",
+    "session:end:obsidian": "bun run scripts/session-end-obsidian.ts",
+    "session:migrate:obsidian": "bun run scripts/migrate-obsidian-sessions.ts",
     "plan:preview": "bun ./scripts/plan-preview.ts",
+    "plan:grc-colourize": "bun ./scripts/plan-grc-colourize.ts",
     "plan:preview:docker": "docker compose up -d plan-preview"
   },
   "dependencies": {
@@ -52,6 +56,7 @@
     "chokidar": "*",
     "cli-boxes": "*",
     "code-excerpt": "*",
+    "color-diff-napi": "file:./shims/color-diff-napi",
     "diff": "*",
     "emoji-regex": "*",
     "env-paths": "*",
@@ -69,6 +74,8 @@
     "lodash-es": "*",
     "lru-cache": "*",
     "marked": "*",
+    "modifiers-napi": "file:./shims/modifiers-napi",
+    "mongodb": "^7.2.0",
     "p-map": "*",
     "picomatch": "*",
     "proper-lockfile": "*",
@@ -84,6 +91,7 @@
     "tree-kill": "*",
     "type-fest": "*",
     "undici": "*",
+    "url-handler-napi": "file:./shims/url-handler-napi",
     "usehooks-ts": "*",
     "vscode-jsonrpc": "*",
     "vscode-languageserver-protocol": "*",
@@ -92,9 +100,6 @@
     "ws": "*",
     "xss": "*",
     "yaml": "*",
-    "zod": "*",
-    "color-diff-napi": "file:./shims/color-diff-napi",
-    "modifiers-napi": "file:./shims/modifiers-napi",
-    "url-handler-napi": "file:./shims/url-handler-napi"
+    "zod": "*"
   }
 }
