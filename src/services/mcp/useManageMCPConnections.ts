@@ -64,11 +64,15 @@ import { errorMessage } from '../../utils/errors.js'
 import { logMCPDebug, logMCPError } from '../../utils/log.js'
 import { enqueue } from '../../utils/messageQueueManager.js'
 import {
+  CHANNEL_ACK_METHOD,
   CHANNEL_PERMISSION_METHOD,
+  CHANNEL_PROGRESS_METHOD,
+  ChannelDeliveryRequestSchema,
   ChannelMessageNotificationSchema,
   ChannelPermissionNotificationSchema,
   findChannelEntry,
   gateChannelServer,
+  registerChannelProgressSender,
   wrapChannelMessage,
 } from './channelNotification.js'
 import {
@@ -470,7 +474,11 @@ export function useManageMCPConnections(
           // Channel push: notifications/claude/channel → enqueue().
           // Gate decides whether to register the handler; connection stays
           // up either way (allowedMcpServers controls that).
-          if (feature('KAIROS') || feature('KAIROS_CHANNELS')) {
+          if (
+            feature('KAIROS') ||
+            feature('KAIROS_CHANNELS') ||
+            getAllowedChannels().length > 0
+          ) {
             const gate = gateChannelServer(
               client.name,
               client.capabilities,
@@ -504,32 +512,62 @@ export function useManageMCPConnections(
             switch (gate.action) {
               case 'register':
                 logMCPDebug(client.name, 'Channel notifications registered')
+                const enqueueChannelMessage = (
+                  content: string,
+                  meta: Record<string, string> | undefined,
+                ) => {
+                  logMCPDebug(
+                    client.name,
+                    `notifications/claude/channel: ${content.slice(0, 80)}`,
+                  )
+                  logEvent('tengu_mcp_channel_message', {
+                    content_length: content.length,
+                    meta_key_count: Object.keys(meta ?? {}).length,
+                    entry_kind:
+                      entry?.kind as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+                    is_dev: entry?.dev ?? false,
+                    plugin: pluginId,
+                  })
+                  enqueue({
+                    mode: 'prompt',
+                    value: wrapChannelMessage(client.name, content, meta),
+                    priority: 'next',
+                    isMeta: true,
+                    origin: { kind: 'channel', server: client.name, meta },
+                    skipSlashCommands: true,
+                    bridgeOrigin: true,
+                  })
+                }
+                client.client.setRequestHandler(
+                  ChannelDeliveryRequestSchema(),
+                  async request => {
+                    const { content, meta } = request.params
+                    enqueueChannelMessage(content, meta)
+                    return { status: 'accepted' }
+                  },
+                )
                 client.client.setNotificationHandler(
                   ChannelMessageNotificationSchema(),
                   async notification => {
                     const { content, meta } = notification.params
-                    logMCPDebug(
-                      client.name,
-                      `notifications/claude/channel: ${content.slice(0, 80)}`,
-                    )
-                    logEvent('tengu_mcp_channel_message', {
-                      content_length: content.length,
-                      meta_key_count: Object.keys(meta ?? {}).length,
-                      entry_kind:
-                        entry?.kind as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-                      is_dev: entry?.dev ?? false,
-                      plugin: pluginId,
-                    })
-                    enqueue({
-                      mode: 'prompt',
-                      value: wrapChannelMessage(client.name, content, meta),
-                      priority: 'next',
-                      isMeta: true,
-                      origin: { kind: 'channel', server: client.name },
-                      skipSlashCommands: true,
+                    enqueueChannelMessage(content, meta)
+                    await client.client.notification({
+                      method: CHANNEL_ACK_METHOD,
+                      params: {
+                        status: 'accepted',
+                        delivery_id: meta?.delivery_id,
+                        chat_id: meta?.chat_id,
+                        message_id: meta?.message_id,
+                      },
                     })
                   },
                 )
+                registerChannelProgressSender(client.name, async params => {
+                  await client.client.notification({
+                    method: CHANNEL_PROGRESS_METHOD,
+                    params,
+                  })
+                })
                 // Permission-reply handler — separate event, separate
                 // capability. Only registers if the server declares
                 // claude/channel/permission (same opt-in check as the send

@@ -279,7 +279,7 @@ async function logEntryToHistoryEntry(entry: LogEntry): Promise<HistoryEntry> {
 }
 
 let pendingEntries: LogEntry[] = []
-let isWriting = false
+let flushQueue = Promise.resolve()
 let currentFlushPromise: Promise<void> | null = null
 let cleanupRegistered = false
 let lastAddedEntry: LogEntry | null = null
@@ -327,29 +327,22 @@ async function immediateFlushHistory(): Promise<void> {
 }
 
 async function flushPromptHistory(retries: number): Promise<void> {
-  if (isWriting || pendingEntries.length === 0) {
-    return
-  }
-
-  // Stop trying to flush history until the next user prompt
-  if (retries > 5) {
-    return
-  }
-
-  isWriting = true
-
-  try {
-    await immediateFlushHistory()
-  } finally {
-    isWriting = false
-
-    if (pendingEntries.length > 0) {
-      // Avoid trying again in a hot loop
-      await sleep(500)
-
-      void flushPromptHistory(retries + 1)
-    }
-  }
+  flushQueue = flushQueue
+    .catch(error => {
+      logForDebugging(`Previous prompt history flush failed: ${error}`)
+    })
+    .then(async () => {
+      let attempt = retries
+      while (pendingEntries.length > 0 && attempt <= 5) {
+        await immediateFlushHistory()
+        if (pendingEntries.length > 0) {
+          // Avoid trying again in a hot loop
+          await sleep(500)
+        }
+        attempt++
+      }
+    })
+  return flushQueue
 }
 
 async function addToPromptHistory(

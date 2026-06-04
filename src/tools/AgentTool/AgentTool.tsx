@@ -5,6 +5,7 @@ import type { Message as MessageType, NormalizedUserMessage } from 'src/types/me
 import { getQuerySourceForAgent } from 'src/utils/promptCategory.js';
 import { z } from 'zod/v4';
 import { clearInvokedSkillsForAgent, getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js';
+import { clearSentSkillNamesForAgent } from '../../utils/attachments.js';
 import { enhanceSystemPromptWithEnvDetails, getSystemPrompt } from '../../constants/prompts.js';
 import { isCoordinatorMode } from '../../coordinator/coordinatorMode.js';
 import { startAgentSummarization } from '../../services/AgentSummary/agentSummary.js';
@@ -29,11 +30,12 @@ import { permissionModeSchema } from '../../utils/permissions/PermissionMode.js'
 import type { PermissionResult } from '../../utils/permissions/PermissionResult.js';
 import { filterDeniedAgents, getDenyRuleForAgent } from '../../utils/permissions/permissions.js';
 import { enqueueSdkEvent } from '../../utils/sdkEventQueue.js';
-import { writeAgentMetadata } from '../../utils/sessionStorage.js';
+import { clearAgentTranscriptSubdir, writeAgentMetadata } from '../../utils/sessionStorage.js';
 import { sleep } from '../../utils/sleep.js';
 import { buildEffectiveSystemPrompt } from '../../utils/systemPrompt.js';
 import { asSystemPrompt } from '../../utils/systemPromptType.js';
 import { getTaskOutputPath } from '../../utils/task/diskOutput.js';
+import { registerTaskEvictionHook } from '../../utils/task/evictionHooks.js';
 import { getParentSessionId, isTeammate } from '../../utils/teammate.js';
 import { isInProcessTeammate } from '../../utils/teammateContext.js';
 import { teleportToRemote } from '../../utils/teleport.js';
@@ -710,6 +712,29 @@ export const AgentTool = buildTool({
           };
         });
       }
+      const unregisterEvictionHook = registerTaskEvictionHook(taskId => {
+        if (taskId !== asyncAgentId) return;
+        unregisterEvictionHook();
+        clearSentSkillNamesForAgent(asyncAgentId);
+        clearAgentTranscriptSubdir(asyncAgentId);
+        rootSetAppState(prev => {
+          const nextAgentNameRegistry = new Map(prev.agentNameRegistry);
+          let changed = false;
+          if (name && nextAgentNameRegistry.get(name) === asyncAgentId) {
+            nextAgentNameRegistry.delete(name);
+            changed = true;
+          }
+          const { [asyncAgentId]: _, ...todos } = prev.todos;
+          if (_ !== undefined) changed = true;
+          return changed
+            ? {
+                ...prev,
+                agentNameRegistry: nextAgentNameRegistry,
+                todos
+              }
+            : prev;
+        });
+      });
 
       // Wrap async agent execution in agent context for analytics attribution
       const asyncAgentContext = {
@@ -799,7 +824,8 @@ export const AgentTool = buildTool({
                 message: normalizedFirstMessage,
                 type: 'agent_progress',
                 prompt,
-                agentId: syncAgentId
+                agentId: syncAgentId,
+                agentType: selectedAgent.agentType
               }
             });
           }
@@ -1117,7 +1143,8 @@ export const AgentTool = buildTool({
                       // prompt only needed on first progress message (UI.tsx:624
                       // reads progressMessages[0]). Omit here to avoid duplication.
                       prompt: '',
-                      agentId: syncAgentId
+                      agentId: syncAgentId,
+                      agentType: selectedAgent.agentType
                     }
                   });
                 }

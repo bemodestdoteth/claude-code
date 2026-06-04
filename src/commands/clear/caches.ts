@@ -26,6 +26,7 @@ import { clearTrackedMagicDocs } from '../../services/MagicDocs/magicDocs.js'
 import { clearDynamicSkills } from '../../skills/loadSkillsDir.js'
 import { resetSentSkillNames } from '../../utils/attachments.js'
 import { clearCommandPrefixCaches } from '../../utils/bash/commands.js'
+import { clearAllCaches } from '../../utils/cacheRegistry.js'
 import { resetGetMemoryFilesCache } from '../../utils/claudemd.js'
 import { clearRepositoryCaches } from '../../utils/detectRepository.js'
 import { clearResolveGitDirCache } from '../../utils/git/gitFilesystem.js'
@@ -48,6 +49,7 @@ export function clearSessionCaches(
   preservedAgentIds: ReadonlySet<string> = new Set(),
 ): void {
   const hasPreserved = preservedAgentIds.size > 0
+  clearAllCaches()
   // Clear context caches
   getUserContext.cache.clear?.()
   getSystemContext.cache.clear?.()

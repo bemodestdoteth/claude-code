@@ -106,7 +106,7 @@ const externalTips: Tip[] = [
   {
     id: 'plan-mode-for-complex-tasks',
     content: async () =>
-      `Use Plan Mode to prepare for a complex request before making changes. Press ${getShortcutDisplay('chat:cycleMode', 'Chat', 'shift+tab')} twice to enable.`,
+      `Use Plan Mode to prepare for a complex request before making changes. Press ${getShortcutDisplay('chat:cycleMode', 'Chat', 'shift+tab')} to toggle Plan Mode.`,
     cooldownSessions: 5,
     isRelevant: async () => {
       if (process.env.USER_TYPE === 'ant') return false
@@ -121,7 +121,7 @@ const externalTips: Tip[] = [
   {
     id: 'default-permission-mode-config',
     content: async () =>
-      `Use /config to change your default permission mode (including Plan Mode)`,
+      `Use /config to set your default permission mode to accept edits or Plan Mode`,
     cooldownSessions: 10,
     isRelevant: async () => {
       try {

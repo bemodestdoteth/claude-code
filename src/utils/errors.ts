@@ -1,4 +1,5 @@
 import { APIUserAbortError } from '@anthropic-ai/sdk'
+import { logForDebugging } from './debug.js'
 
 export class ClaudeError extends Error {
   constructor(message: string) {
@@ -118,6 +119,12 @@ export function toError(e: unknown): Error {
  */
 export function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
+}
+
+export function logAndSwallow(label: string): (e: unknown) => void {
+  return e => {
+    logForDebugging(`${label}: ${errorMessage(e)}`, { level: 'error' })
+  }
 }
 
 /**

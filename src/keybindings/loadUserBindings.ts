@@ -406,11 +406,12 @@ export async function initializeKeybindingWatcher(): Promise<void> {
 /**
  * Clean up the file watcher.
  */
-export function disposeKeybindingWatcher(): void {
+export async function disposeKeybindingWatcher(): Promise<void> {
   disposed = true
-  if (watcher) {
-    void watcher.close()
-    watcher = null
+  const currentWatcher = watcher
+  watcher = null
+  if (currentWatcher) {
+    await currentWatcher.close()
   }
   keybindingsChanged.clear()
 }
@@ -458,15 +459,16 @@ export function getCachedKeybindingWarnings(): KeybindingWarning[] {
 /**
  * Reset internal state for testing.
  */
-export function resetKeybindingLoaderForTesting(): void {
+export async function resetKeybindingLoaderForTesting(): Promise<void> {
   initialized = false
   disposed = false
   cachedBindings = null
   cachedWarnings = []
   lastCustomBindingsLogDate = null
-  if (watcher) {
-    void watcher.close()
-    watcher = null
+  const currentWatcher = watcher
+  watcher = null
+  if (currentWatcher) {
+    await currentWatcher.close()
   }
   keybindingsChanged.clear()
 }

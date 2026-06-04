@@ -17,6 +17,7 @@ import type { TaskState } from '../../tasks/types.js'
 import { enqueuePendingNotification } from '../messageQueueManager.js'
 import { enqueueSdkEvent } from '../sdkEventQueue.js'
 import { getTaskOutputDelta, getTaskOutputPath } from './diskOutput.js'
+import { notifyTaskEvicted } from './evictionHooks.js'
 
 // Standard polling interval for all tasks
 export const POLL_INTERVAL_MS = 1000
@@ -126,6 +127,7 @@ export function evictTerminalTask(
   taskId: string,
   setAppState: SetAppState,
 ): void {
+  let evicted = false
   setAppState(prev => {
     const task = prev.tasks?.[taskId]
     if (!task) return prev
@@ -139,8 +141,10 @@ export function evictTerminalTask(
       return prev
     }
     const { [taskId]: _, ...remainingTasks } = prev.tasks
+    evicted = true
     return { ...prev, tasks: remainingTasks }
   })
+  if (evicted) notifyTaskEvicted(taskId)
 }
 
 /**
@@ -219,6 +223,7 @@ export function applyTaskOffsetsAndEvictions(
   if (offsetIds.length === 0 && evictedTaskIds.length === 0) {
     return
   }
+  const evictedIds: string[] = []
   setAppState(prev => {
     let changed = false
     const newTasks = { ...prev.tasks }
@@ -242,10 +247,12 @@ export function applyTaskOffsetsAndEvictions(
         continue
       }
       delete newTasks[id]
+      evictedIds.push(id)
       changed = true
     }
     return changed ? { ...prev, tasks: newTasks } : prev
   })
+  for (const id of evictedIds) notifyTaskEvicted(id)
 }
 
 /**

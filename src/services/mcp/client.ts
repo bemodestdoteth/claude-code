@@ -40,6 +40,7 @@ import mapValues from 'lodash-es/mapValues.js'
 import memoize from 'lodash-es/memoize.js'
 import zipObject from 'lodash-es/zipObject.js'
 import pMap from 'p-map'
+import treeKill from 'tree-kill'
 import { getOriginalCwd, getSessionId } from '../../bootstrap/state.js'
 import type { Command } from '../../commands.js'
 import { getOauthConfig } from '../../constants/oauth.js'
@@ -166,6 +167,121 @@ class McpSessionExpiredError extends Error {
   constructor(serverName: string) {
     super(`MCP server "${serverName}" session expired`)
     this.name = 'McpSessionExpiredError'
+  }
+}
+
+function isStdioServerConfig(serverRef: ScopedMcpServerConfig): boolean {
+  return serverRef.type === 'stdio' || !serverRef.type
+}
+
+async function killProcessTree(
+  pid: number,
+  signal: NodeJS.Signals,
+): Promise<void> {
+  try {
+    await new Promise<void>((resolve, reject) => {
+      treeKill(pid, signal, error => {
+        if (error) {
+          reject(error)
+        } else {
+          resolve()
+        }
+      })
+    })
+  } catch (error) {
+    logMCPDebug(
+      'mcp',
+      `Error sending ${signal} to MCP server process tree: ${error}`,
+    )
+    process.kill(pid, signal)
+  }
+}
+
+async function terminateStdioTransport(
+  name: string,
+  transport: StdioClientTransport,
+): Promise<void> {
+  try {
+    const childPid = transport.pid
+
+    if (!childPid) {
+      return
+    }
+
+    logMCPDebug(name, 'Sending SIGINT to MCP server process')
+
+    try {
+      await killProcessTree(childPid, 'SIGINT')
+    } catch (error) {
+      logMCPDebug(name, `Error sending SIGINT: ${error}`)
+      return
+    }
+
+    await new Promise<void>(async resolve => {
+      let resolved = false
+
+      const resolveOnce = () => {
+        if (!resolved) {
+          resolved = true
+          clearInterval(checkInterval)
+          clearTimeout(failsafeTimeout)
+          resolve()
+        }
+      }
+
+      const processStillExists = () => {
+        try {
+          process.kill(childPid, 0)
+          return true
+        } catch {
+          return false
+        }
+      }
+
+      const checkInterval = setInterval(() => {
+        if (!processStillExists()) {
+          logMCPDebug(name, 'MCP server process exited cleanly')
+          resolveOnce()
+        }
+      }, 50)
+
+      const failsafeTimeout = setTimeout(() => {
+        logMCPDebug(name, 'Cleanup timeout reached, stopping process monitoring')
+        resolveOnce()
+      }, 600)
+
+      try {
+        await sleep(100)
+
+        if (!resolved && processStillExists()) {
+          logMCPDebug(name, 'SIGINT failed, sending SIGTERM to MCP server process')
+          try {
+            await killProcessTree(childPid, 'SIGTERM')
+          } catch (termError) {
+            logMCPDebug(name, `Error sending SIGTERM: ${termError}`)
+            resolveOnce()
+            return
+          }
+        }
+
+        await sleep(400)
+
+        if (!resolved && processStillExists()) {
+          logMCPDebug(name, 'SIGTERM failed, sending SIGKILL to MCP server process')
+          try {
+            await killProcessTree(childPid, 'SIGKILL')
+          } catch (killError) {
+            logMCPDebug(name, `Error sending SIGKILL: ${killError}`)
+          }
+        }
+
+        resolveOnce()
+      } catch {
+        resolveOnce()
+      }
+    })
+  } catch (processError) {
+    logMCPDebug(name, `Error terminating process: ${processError}`)
   }
 }
 
@@ -609,6 +725,7 @@ export const connectToServer = memoize(
     let inProcessServer:
       | { connect(t: Transport): Promise<void>; close(): Promise<void> }
       | undefined
+    let createdStdioTransport: StdioClientTransport | undefined
     try {
       let transport
 
@@ -903,7 +1020,7 @@ export const connectToServer = memoize(
         )
         logMCPDebug(name, `claude.ai proxy transport created successfully`)
       } else if (
-        (serverRef.type === 'stdio' || !serverRef.type) &&
+        isStdioServerConfig(serverRef) &&
         isClaudeInChromeMCPServer(name)
       ) {
         // Run the Chrome MCP server in-process to avoid spawning a ~325 MB subprocess
@@ -924,7 +1041,7 @@ export const connectToServer = memoize(
         logMCPDebug(name, `In-process Chrome MCP server started`)
       } else if (
         feature('CHICAGO_MCP') &&
-        (serverRef.type === 'stdio' || !serverRef.type) &&
+        isStdioServerConfig(serverRef) &&
         isComputerUseMCPServer!(name)
       ) {
         // Run the Computer Use MCP server in-process — same rationale as
@@ -941,7 +1058,7 @@ export const connectToServer = memoize(
         await inProcessServer.connect(serverTransport)
         transport = clientTransport
         logMCPDebug(name, `In-process Computer Use MCP server started`)
-      } else if (serverRef.type === 'stdio' || !serverRef.type) {
+      } else if (isStdioServerConfig(serverRef)) {
         const finalCommand =
           process.env.CLAUDE_CODE_SHELL_PREFIX || serverRef.command
         const finalArgs = process.env.CLAUDE_CODE_SHELL_PREFIX
@@ -956,6 +1073,7 @@ export const connectToServer = memoize(
           } as Record<string, string>,
           stderr: 'pipe', // prevents error output from the MCP server from printing to the UI
         })
+        createdStdioTransport = transport
       } else {
         throw new Error(`Unsupported server type: ${serverRef.type}`)
       }
@@ -965,7 +1083,7 @@ export const connectToServer = memoize(
       // Store handler reference for cleanup to prevent memory leaks
       let stderrHandler: ((data: Buffer) => void) | undefined
       let stderrOutput = ''
-      if (serverRef.type === 'stdio' || !serverRef.type) {
+      if (isStdioServerConfig(serverRef)) {
         const stdioTransport = transport as StdioClientTransport
         if (stdioTransport.stderr) {
           stderrHandler = (data: Buffer) => {
@@ -1418,7 +1536,7 @@ export const connectToServer = memoize(
         }
 
         // Remove stderr event listener to prevent memory leaks
-        if (stderrHandler && (serverRef.type === 'stdio' || !serverRef.type)) {
+        if (stderrHandler && isStdioServerConfig(serverRef)) {
           const stdioTransport = transport as StdioClientTransport
           stdioTransport.stderr?.off('data', stderrHandler)
         }
@@ -1426,139 +1544,8 @@ export const connectToServer = memoize(
         // For stdio transports, explicitly terminate the child process with proper signals
         // NOTE: StdioClientTransport.close() only sends an abort signal, but many MCP servers
         // (especially Docker containers) need explicit SIGINT/SIGTERM signals to trigger graceful shutdown
-        if (serverRef.type === 'stdio') {
-          try {
-            const stdioTransport = transport as StdioClientTransport
-            const childPid = stdioTransport.pid
-
-            if (childPid) {
-              logMCPDebug(name, 'Sending SIGINT to MCP server process')
-
-              // First try SIGINT (like Ctrl+C)
-              try {
-                process.kill(childPid, 'SIGINT')
-              } catch (error) {
-                logMCPDebug(name, `Error sending SIGINT: ${error}`)
-                return
-              }
-
-              // Wait for graceful shutdown with rapid escalation (total 500ms to keep CLI responsive)
-              await new Promise<void>(async resolve => {
-                let resolved = false
-
-                // Set up a timer to check if process still exists
-                const checkInterval = setInterval(() => {
-                  try {
-                    // process.kill(pid, 0) checks if process exists without killing it
-                    process.kill(childPid, 0)
-                  } catch {
-                    // Process no longer exists
-                    if (!resolved) {
-                      resolved = true
-                      clearInterval(checkInterval)
-                      clearTimeout(failsafeTimeout)
-                      logMCPDebug(name, 'MCP server process exited cleanly')
-                      resolve()
-                    }
-                  }
-                }, 50)
-
-                // Absolute failsafe: clear interval after 600ms no matter what
-                const failsafeTimeout = setTimeout(() => {
-                  if (!resolved) {
-                    resolved = true
-                    clearInterval(checkInterval)
-                    logMCPDebug(
-                      name,
-                      'Cleanup timeout reached, stopping process monitoring',
-                    )
-                    resolve()
-                  }
-                }, 600)
-
-                try {
-                  // Wait 100ms for SIGINT to work (usually much faster)
-                  await sleep(100)
-
-                  if (!resolved) {
-                    // Check if process still exists
-                    try {
-                      process.kill(childPid, 0)
-                      // Process still exists, SIGINT failed, try SIGTERM
-                      logMCPDebug(
-                        name,
-                        'SIGINT failed, sending SIGTERM to MCP server process',
-                      )
-                      try {
-                        process.kill(childPid, 'SIGTERM')
-                      } catch (termError) {
-                        logMCPDebug(name, `Error sending SIGTERM: ${termError}`)
-                        resolved = true
-                        clearInterval(checkInterval)
-                        clearTimeout(failsafeTimeout)
-                        resolve()
-                        return
-                      }
-                    } catch {
-                      // Process already exited
-                      resolved = true
-                      clearInterval(checkInterval)
-                      clearTimeout(failsafeTimeout)
-                      resolve()
-                      return
-                    }
-
-                    // Wait 400ms for SIGTERM to work (slower than SIGINT, often used for cleanup)
-                    await sleep(400)
-
-                    if (!resolved) {
-                      // Check if process still exists
-                      try {
-                        process.kill(childPid, 0)
-                        // Process still exists, SIGTERM failed, force kill with SIGKILL
-                        logMCPDebug(
-                          name,
-                          'SIGTERM failed, sending SIGKILL to MCP server process',
-                        )
-                        try {
-                          process.kill(childPid, 'SIGKILL')
-                        } catch (killError) {
-                          logMCPDebug(
-                            name,
-                            `Error sending SIGKILL: ${killError}`,
-                          )
-                        }
-                      } catch {
-                        // Process already exited
-                        resolved = true
-                        clearInterval(checkInterval)
-                        clearTimeout(failsafeTimeout)
-                        resolve()
-                      }
-                    }
-                  }
-
-                  // Final timeout - always resolve after 500ms max (total cleanup time)
-                  if (!resolved) {
-                    resolved = true
-                    clearInterval(checkInterval)
-                    clearTimeout(failsafeTimeout)
-                    resolve()
-                  }
-                } catch {
-                  // Handle any errors in the escalation sequence
-                  if (!resolved) {
-                    resolved = true
-                    clearInterval(checkInterval)
-                    clearTimeout(failsafeTimeout)
-                    resolve()
-                  }
-                }
-              })
-            }
-          } catch (processError) {
-            logMCPDebug(name, `Error terminating process: ${processError}`)
-          }
+        if (isStdioServerConfig(serverRef)) {
+          await terminateStdioTransport(name, transport as StdioClientTransport)
         }
 
         // Close the client connection (which also closes the transport)
@@ -1608,7 +1595,7 @@ export const connectToServer = memoize(
         connectionDurationMs,
         totalServers: serverStats?.totalServers || 1,
         stdioCount:
-          serverStats?.stdioCount || (serverRef.type === 'stdio' ? 1 : 0),
+          serverStats?.stdioCount || (isStdioServerConfig(serverRef) ? 1 : 0),
         sseCount: serverStats?.sseCount || (serverRef.type === 'sse' ? 1 : 0),
         httpCount:
           serverStats?.httpCount || (serverRef.type === 'http' ? 1 : 0),
@@ -1628,6 +1615,12 @@ export const connectToServer = memoize(
 
       if (inProcessServer) {
         inProcessServer.close().catch(() => {})
+      }
+      if (createdStdioTransport) {
+        await terminateStdioTransport(name, createdStdioTransport)
+        await createdStdioTransport.close().catch(error => {
+          logMCPDebug(name, `Error closing failed stdio transport: ${error}`)
+        })
       }
       return {
         name,
@@ -1838,9 +1831,15 @@ export const fetchToolsForClient = memoizeWithLRU(
               onProgress?: ToolCallProgress<MCPProgress>,
             ) {
               const toolUseId = extractToolUseId(parentMessage)
-              const meta = toolUseId
-                ? { 'claudecode/toolUseId': toolUseId }
-                : {}
+              const meta = {
+                ...(toolUseId ? { 'claudecode/toolUseId': toolUseId } : {}),
+                ...(context.agentId
+                  ? { 'claudecode/agentId': String(context.agentId) }
+                  : {}),
+                ...(context.agentType
+                  ? { 'claudecode/agentType': context.agentType }
+                  : {}),
+              }
 
               // Emit progress when tool starts
               if (onProgress && toolUseId) {

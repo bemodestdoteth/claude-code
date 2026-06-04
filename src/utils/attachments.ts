@@ -2614,6 +2614,10 @@ export function resetSentSkillNames(): void {
   suppressNext = false
 }
 
+export function clearSentSkillNamesForAgent(agentId: string): void {
+  sentSkillNames.delete(agentId)
+}
+
 /**
  * Suppress the next skill-listing injection. Called by conversationRecovery
  * on --resume when a skill_listing attachment already exists in the

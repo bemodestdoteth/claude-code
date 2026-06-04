@@ -27,7 +27,10 @@ import {
   type PermissionDecisionReason,
   type PermissionResult,
 } from '../../utils/permissions/PermissionResult.js'
-import { checkRuleBasedPermissions } from '../../utils/permissions/permissions.js'
+import {
+  checkRuleBasedPermissions,
+  hasPermissionsToUseTool,
+} from '../../utils/permissions/permissions.js'
 import { formatError } from '../../utils/toolErrors.js'
 import { isMcpTool } from '../mcp/utils.js'
 import type { McpServerType, MessageUpdateLazy } from './toolExecution.js'
@@ -410,25 +413,42 @@ export async function resolveHookPermissionDecision(
     return { decision: hookPermissionResult, input }
   }
 
-  // No hook decision or 'ask' — normal permission flow, possibly with
-  // forceDecision so the dialog shows the hook's ask message.
-  const forceDecision =
-    hookPermissionResult?.behavior === 'ask' ? hookPermissionResult : undefined
-  const askInput =
-    hookPermissionResult?.behavior === 'ask' &&
-    hookPermissionResult.updatedInput
-      ? hookPermissionResult.updatedInput
-      : input
-  return {
-    decision: await canUseTool(
+  if (hookPermissionResult?.behavior === 'ask') {
+    const askInput = hookPermissionResult.updatedInput ?? input
+    const normalDecision = await hasPermissionsToUseTool(
       tool,
       askInput,
       toolUseContext,
       assistantMessage,
       toolUseID,
-      forceDecision,
+    )
+
+    if (normalDecision.behavior === 'allow') {
+      return { decision: normalDecision, input: askInput }
+    }
+
+    return {
+      decision: await canUseTool(
+        tool,
+        askInput,
+        toolUseContext,
+        assistantMessage,
+        toolUseID,
+        hookPermissionResult,
+      ),
+      input: askInput,
+    }
+  }
+
+  return {
+    decision: await canUseTool(
+      tool,
+      input,
+      toolUseContext,
+      assistantMessage,
+      toolUseID,
     ),
-    input: askInput,
+    input,
   }
 }
 

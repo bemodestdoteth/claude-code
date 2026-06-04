@@ -16,6 +16,7 @@ import type { AgentColorName } from '../tools/AgentTool/agentColorManager.js'
 import {
   type AgentDefinition,
   type AgentDefinitionsResult,
+  clearAgentDefinitionsCache,
   getActiveAgentsFromList,
   getAgentDefinitionsWithOverrides,
 } from '../tools/AgentTool/loadAgentsDir.js'
@@ -260,7 +261,7 @@ export async function refreshAgentDefinitionsForModeSwitch(
 
   // Re-derive agent definitions after mode switch so built-in agents
   // reflect the new coordinator/normal mode
-  getAgentDefinitionsWithOverrides.cache.clear?.()
+  clearAgentDefinitionsCache()
   const freshAgentDefs = await getAgentDefinitionsWithOverrides(currentCwd)
   const freshAllAgents = [...freshAgentDefs.allAgents, ...cliAgents]
   return {

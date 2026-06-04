@@ -69,7 +69,7 @@ import {
 } from '../../utils/context.js'
 import { resolveAppliedEffort } from '../../utils/effort.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
-import { errorMessage } from '../../utils/errors.js'
+import { errorMessage, logAndSwallow } from '../../utils/errors.js'
 import { computeFingerprintFromMessages } from '../../utils/fingerprint.js'
 import { captureAPIRequest, logError } from '../../utils/log.js'
 import {
@@ -1520,7 +1520,7 @@ async function* queryModel(
     cleanupStream(stream)
     stream = undefined
     if (streamResponse) {
-      streamResponse.body?.cancel().catch(() => {})
+      streamResponse.body?.cancel().catch(logAndSwallow('api:stream-cancel'))
       streamResponse = undefined
     }
   }

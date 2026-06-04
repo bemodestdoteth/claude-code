@@ -17,7 +17,6 @@ import type { FrontmatterData } from './frontmatterParser.js'
 import { parseFrontmatter } from './frontmatterParser.js'
 import { findCanonicalGitRoot, findGitRoot } from './git.js'
 import { parseToolListFromCLI } from './permissions/permissionSetup.js'
-import { ripGrep } from './ripgrep.js'
 import {
   isSettingSourceEnabled,
   type SettingSource,
@@ -429,13 +428,18 @@ export const loadMarkdownFilesForSubdir = memoize(
   (subdir: ClaudeConfigDirectory, cwd: string) => `${subdir}:${cwd}`,
 )
 
+
+export function clearMarkdownFilesForSubdirCache(): void {
+  loadMarkdownFilesForSubdir.cache.clear?.()
+}
+
 /**
  * Native implementation to find markdown files using Node.js fs APIs
  *
  * This implementation exists alongside ripgrep for the following reasons:
  * 1. Ripgrep has poor startup performance in native builds (noticeable on app startup)
  * 2. Provides a fallback when ripgrep is unavailable
- * 3. Can be explicitly enabled via CLAUDE_CODE_USE_NATIVE_FILE_SEARCH env var
+ * 3. Avoids depending on the vendored ripgrep binary during startup discovery
  *
  * Symlink handling:
  * - Follows symlinks (equivalent to ripgrep's --follow flag)
@@ -551,25 +555,16 @@ async function loadMarkdownFiles(dir: string): Promise<
   }[]
 > {
   // File search strategy:
-  // - Default: ripgrep (faster, battle-tested)
-  // - Fallback: native Node.js (when CLAUDE_CODE_USE_NATIVE_FILE_SEARCH is set)
+  // - Default: native Node.js recursive search
   //
-  // Why both? Ripgrep has poor startup performance in native builds.
-  const useNative = isEnvTruthy(process.env.CLAUDE_CODE_USE_NATIVE_FILE_SEARCH)
+  // Native search avoids depending on the vendored ripgrep binary during startup discovery.
   const signal = AbortSignal.timeout(3000)
   let files: string[]
   try {
-    files = useNative
-      ? await findMarkdownFilesNative(dir, signal)
-      : await ripGrep(
-          ['--files', '--hidden', '--follow', '--no-ignore', '--glob', '*.md'],
-          dir,
-          signal,
-        )
+    files = await findMarkdownFilesNative(dir, signal)
   } catch (e: unknown) {
     // Handle missing/inaccessible dir directly instead of pre-checking
-    // existence (TOCTOU). findMarkdownFilesNative already catches internally;
-    // ripGrep rejects on inaccessible target paths.
+    // existence (TOCTOU). findMarkdownFilesNative already catches internally.
     if (isFsInaccessible(e)) return []
     throw e
   }

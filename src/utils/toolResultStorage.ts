@@ -111,9 +111,13 @@ export const PREVIEW_SIZE_BYTES = 2000
 /**
  * Get the filepath where a tool result would be persisted.
  */
+function sanitizeToolResultFileId(id: string): string {
+  return id.replace(/[^A-Za-z0-9_.-]/g, '_')
+}
+
 export function getToolResultPath(id: string, isJson: boolean): string {
   const ext = isJson ? 'json' : 'txt'
-  return join(getToolResultsDir(), `${id}.${ext}`)
+  return join(getToolResultsDir(), `${sanitizeToolResultFileId(id)}.${ext}`)
 }
 
 /**
@@ -433,6 +437,17 @@ export function getPerMessageBudgetLimit(): number {
   return MAX_TOOL_RESULTS_PER_MESSAGE_CHARS
 }
 
+export function getAggregateToolResultBudgetLimit(): number | undefined {
+  const value = process.env.CLAUDE_CODE_AGGREGATE_TOOL_RESULT_BUDGET_CHARS
+  if (!value) return undefined
+  const limit = Number(value)
+  return Number.isFinite(limit) && limit > 0 ? limit : undefined
+}
+
+export function isAggregateToolResultBudgetEnabled(): boolean {
+  return getAggregateToolResultBudgetLimit() !== undefined
+}
+
 /**
  * Provision replacement state for a new conversation thread.
  *
@@ -448,10 +463,11 @@ export function provisionContentReplacementState(
   initialMessages?: Message[],
   initialContentReplacements?: ContentReplacementRecord[],
 ): ContentReplacementState | undefined {
-  const enabled = getFeatureValue_CACHED_MAY_BE_STALE(
-    'tengu_hawthorn_steeple',
-    false,
-  )
+  const enabled =
+    getFeatureValue_CACHED_MAY_BE_STALE(
+      'tengu_hawthorn_steeple',
+      false,
+    ) || isAggregateToolResultBudgetEnabled()
   if (!enabled) return undefined
   if (initialMessages) {
     return reconstructContentReplacementState(
@@ -691,6 +707,31 @@ function selectFreshToReplace(
   return selected
 }
 
+function selectFreshForAggregateBudget(
+  fresh: ToolResultCandidate[],
+  retainedSizeAfterPriorSelection: number,
+  limit: number,
+): ToolResultCandidate[] {
+  if (retainedSizeAfterPriorSelection <= limit) return []
+  const selectableSize = fresh.reduce((sum, c) => sum + c.size, 0)
+  return selectFreshToReplace(
+    fresh,
+    retainedSizeAfterPriorSelection - selectableSize,
+    limit,
+  )
+}
+
+function uniqueCandidatesByToolUseId(
+  candidates: ToolResultCandidate[],
+): ToolResultCandidate[] {
+  const seen = new Set<string>()
+  return candidates.filter(candidate => {
+    if (seen.has(candidate.toolUseId)) return false
+    seen.add(candidate.toolUseId)
+    return true
+  })
+}
+
 /**
  * Return a new Message[] where each tool_result block whose id appears in
  * replacementMap has its content replaced. Messages and blocks with no
@@ -784,14 +825,17 @@ export async function enforceToolResultBudget(
   // messages (prior decisions are frozen via seenIds/replacements), so
   // prompt cache for already-seen content is preserved regardless.
   const limit = getPerMessageBudgetLimit()
+  const aggregateLimit = getAggregateToolResultBudgetLimit()
 
   // Walk each API-level message group independently. For previously-processed messages
   // (all IDs in seenIds) this just re-applies cached replacements. For the
   // single new message this turn added, it runs the budget check.
   const replacementMap = new Map<string, string>()
   const toPersist: ToolResultCandidate[] = []
+  let retainedUnreplacedSize = 0
   let reappliedCount = 0
   let messagesOverBudget = 0
+  let aggregateBudgetPersisted = 0
 
   for (const candidates of candidatesByMessage) {
     const { mustReapply, frozen, fresh } = partitionByPriorDecision(
@@ -802,6 +846,7 @@ export async function enforceToolResultBudget(
     // Re-apply: pure Map lookups. No file I/O, byte-identical, cannot fail.
     mustReapply.forEach(c => replacementMap.set(c.toolUseId, c.replacement))
     reappliedCount += mustReapply.length
+    retainedUnreplacedSize += frozen.reduce((sum, c) => sum + c.size, 0)
 
     // Fresh means this is a new message. Check its per-message budget.
     // (A previously-processed message has fresh.length === 0 because all
@@ -829,6 +874,20 @@ export async function enforceToolResultBudget(
       frozenSize + freshSize > limit
         ? selectFreshToReplace(eligible, frozenSize, limit)
         : []
+    const aggregateSelected =
+      aggregateLimit !== undefined
+        ? selectFreshForAggregateBudget(
+            eligible.filter(c => !selected.some(s => s.toolUseId === c.toolUseId)),
+            retainedUnreplacedSize + freshSize,
+            aggregateLimit,
+          )
+        : []
+    const selectedForPersist = uniqueCandidatesByToolUseId([
+      ...selected,
+      ...aggregateSelected,
+    ])
+    retainedUnreplacedSize +=
+      freshSize - selectedForPersist.reduce((sum, c) => sum + c.size, 0)
 
     // Mark non-persisting candidates as seen NOW (synchronously). IDs
     // selected for persist are marked seen AFTER the await, alongside
@@ -836,14 +895,15 @@ export async function enforceToolResultBudget(
     // concurrent reader (once subagents share state) ever sees X∈seenIds
     // but X∉replacements, which would misclassify X as frozen and send
     // full content while the main thread sends the preview → cache miss.
-    const selectedIds = new Set(selected.map(c => c.toolUseId))
+    const selectedIds = new Set(selectedForPersist.map(c => c.toolUseId))
     candidates
       .filter(c => !selectedIds.has(c.toolUseId))
       .forEach(c => state.seenIds.add(c.toolUseId))
 
-    if (selected.length === 0) continue
-    messagesOverBudget++
-    toPersist.push(...selected)
+    if (selectedForPersist.length === 0) continue
+    if (selected.length > 0) messagesOverBudget++
+    aggregateBudgetPersisted += aggregateSelected.length
+    toPersist.push(...selectedForPersist)
   }
 
   if (replacementMap.size === 0 && toPersist.length === 0) {
@@ -899,6 +959,14 @@ export async function enforceToolResultBudget(
       messagesOverBudget,
       replacedSizeBytes: replacedSize,
       reapplied: reappliedCount,
+    })
+  }
+
+  if (aggregateBudgetPersisted > 0) {
+    logEvent('tengu_aggregate_tool_result_budget_enforced', {
+      resultsPersisted: aggregateBudgetPersisted,
+      retainedUnreplacedSizeBytes: retainedUnreplacedSize,
+      limitBytes: aggregateLimit ?? 0,
     })
   }
 

@@ -39,9 +39,8 @@ function isSlashCommand(cmd: QueuedCommand): boolean {
  * isolation, exit codes, and progress UI. Other non-slash commands are
  * batched: all items **with the same mode** as the highest-priority item
  * are drained at once and passed as a single array to executeInput — each
- * becomes its own user message with its own UUID. Different modes
- * (e.g. prompt vs task-notification) are never mixed because they are
- * treated differently downstream.
+ * becomes its own user message with its own UUID. Different modes or channel
+ * workspaces are never mixed because they are treated differently downstream.
  *
  * The caller is responsible for ensuring no query is currently running
  * and for calling this function again after each command completes
@@ -73,10 +72,17 @@ export function processQueueIfReady({
     return { processed: true }
   }
 
-  // Drain all non-slash-command items with the same mode at once.
+  // Drain all non-slash-command items with the same mode and workspace at once.
   const targetMode = next.mode
+  const targetCwd = next.cwd
+  const targetWorkspace = next.workspace
   const commands = dequeueAllMatching(
-    cmd => isMainThread(cmd) && !isSlashCommand(cmd) && cmd.mode === targetMode,
+    cmd =>
+      isMainThread(cmd) &&
+      !isSlashCommand(cmd) &&
+      cmd.mode === targetMode &&
+      cmd.cwd === targetCwd &&
+      cmd.workspace === targetWorkspace,
   )
   if (commands.length === 0) {
     return { processed: false }

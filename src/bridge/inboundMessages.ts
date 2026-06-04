@@ -18,6 +18,12 @@ import { detectImageFormatFromBase64 } from '../utils/imageResizer.js'
  * Returns the extracted fields, or undefined if the message should be
  * skipped (non-user type, missing/empty content).
  */
+export function convertInboundContentForQueue(
+  content: string | Array<ContentBlockParam>,
+): { value: string | Array<ContentBlockParam>; pastedContents: undefined } {
+  return { value: content, pastedContents: undefined }
+}
+
 export function extractInboundMessageFields(
   msg: SDKMessage,
 ):

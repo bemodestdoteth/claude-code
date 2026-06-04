@@ -889,10 +889,7 @@ export const SettingsSchema = lazySchema(() =>
       // MCP servers that declare the claude/channel capability can push
       // inbound messages into the conversation; for managed orgs this only
       // works when explicitly enabled. Which servers can connect at all is
-      // still governed by allowedMcpServers/deniedMcpServers. Not
-      // feature-spread: KAIROS_CHANNELS is external:true, and the spread
-      // wrecks type inference for allowedChannelPlugins (the .passthrough()
-      // catch-all gives {} instead of the array type).
+      // still governed by allowedMcpServers/deniedMcpServers.
       channelsEnabled: z
         .boolean()
         .optional()

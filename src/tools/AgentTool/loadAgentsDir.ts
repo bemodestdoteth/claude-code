@@ -24,6 +24,7 @@ import { parsePositiveIntFromFrontmatter } from '../../utils/frontmatterParser.j
 import { lazySchema } from '../../utils/lazySchema.js'
 import { logError } from '../../utils/log.js'
 import {
+  clearMarkdownFilesForSubdirCache,
   loadMarkdownFilesForSubdir,
   parseAgentToolsFromFrontmatter,
   parseSlashCommandToolsFromFrontmatter,
@@ -394,6 +395,7 @@ export const getAgentDefinitionsWithOverrides = memoize(
 
 export function clearAgentDefinitionsCache(): void {
   getAgentDefinitionsWithOverrides.cache.clear?.()
+  clearMarkdownFilesForSubdirCache()
   clearPluginAgentCache()
 }
 

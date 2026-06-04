@@ -30,15 +30,34 @@ import {
   isChannelsEnabled,
 } from './channelAllowlist.js'
 
+const ChannelMessageParamsSchema = z.object({
+  content: z.string(),
+  // Opaque passthrough — thread_id, user, whatever the channel wants the
+  // model to see. Rendered as attributes on the <channel> tag.
+  meta: z.record(z.string(), z.string()).optional(),
+})
+
+export const CHANNEL_MESSAGE_NOTIFICATION_METHOD = 'notifications/claude/channel'
+
 export const ChannelMessageNotificationSchema = lazySchema(() =>
   z.object({
-    method: z.literal('notifications/claude/channel'),
-    params: z.object({
-      content: z.string(),
-      // Opaque passthrough — thread_id, user, whatever the channel wants the
-      // model to see. Rendered as attributes on the <channel> tag.
-      meta: z.record(z.string(), z.string()).optional(),
-    }),
+    method: z.literal(CHANNEL_MESSAGE_NOTIFICATION_METHOD),
+    params: ChannelMessageParamsSchema,
+  }),
+)
+
+export const CHANNEL_DELIVERY_REQUEST_METHOD = 'claude/channel/deliver'
+
+export const ChannelDeliveryRequestSchema = lazySchema(() =>
+  z.object({
+    method: z.literal(CHANNEL_DELIVERY_REQUEST_METHOD),
+    params: ChannelMessageParamsSchema,
+  }),
+)
+
+export const ChannelDeliveryResultSchema = lazySchema(() =>
+  z.object({
+    status: z.literal('accepted'),
   }),
 )
 
@@ -88,6 +107,44 @@ export type ChannelPermissionRequestParams = {
    *  input is in the local terminal dialog; this is a phone-sized
    *  preview. Server decides whether/how to show it. */
   input_preview: string
+}
+
+export const CHANNEL_ACK_METHOD = 'notifications/claude/channel/ack'
+export type ChannelAckParams = {
+  status: 'accepted'
+  delivery_id?: string
+  chat_id?: string
+  message_id?: string
+  reason?: string
+}
+
+export const CHANNEL_PROGRESS_METHOD =
+  'notifications/claude/channel/progress'
+export type ChannelProgressStatus = 'started' | 'progress' | 'done' | 'error'
+export type ChannelProgressParams = {
+  status: ChannelProgressStatus
+  message: string
+  chat_id?: string
+  user_id?: string
+  message_id?: string
+  workspace?: string
+  _meta?: Record<string, string>
+}
+
+type ChannelProgressSender = (params: ChannelProgressParams) => Promise<void>
+const channelProgressSenders = new Map<string, ChannelProgressSender>()
+
+export function registerChannelProgressSender(
+  serverName: string,
+  sender: ChannelProgressSender,
+): void {
+  channelProgressSenders.set(serverName, sender)
+}
+
+export function getChannelProgressSender(
+  serverName: string,
+): ChannelProgressSender | undefined {
+  return channelProgressSenders.get(serverName)
 }
 
 /**

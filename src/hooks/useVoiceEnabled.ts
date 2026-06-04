@@ -13,7 +13,7 @@ import {
  * GB is a cheap cached-map lookup and stays outside the memo so a mid-session
  * kill-switch flip still takes effect on the next render.
  *
- * authVersion bumps on /login only. Background token refresh leaves it alone
+ * authVersion bumps when authentication changes. Background token refresh leaves it alone
  * (user is still authed), so the auth memo stays correct without re-eval.
  */
 export function useVoiceEnabled(): boolean {

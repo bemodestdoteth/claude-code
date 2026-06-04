@@ -2,9 +2,29 @@ import * as React from 'react';
 import { AgentsMenu } from '../../components/agents/AgentsMenu.js';
 import type { ToolUseContext } from '../../Tool.js';
 import { getTools } from '../../tools.js';
+import type { AgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js';
 import type { LocalJSXCommandOnDone } from '../../types/command.js';
+
+export function formatAgent(agent: AgentDefinition): string {
+  const details = [agent.source, agent.model, agent.memory ? `${agent.memory} memory` : undefined].filter(Boolean).join(' · ');
+  return details ? `- ${agent.agentType} (${details})` : `- ${agent.agentType}`;
+}
+
+export function formatAgentsList(agents: readonly AgentDefinition[]): string {
+  if (agents.length === 0) {
+    return 'No agents configured';
+  }
+
+  return `Available agents:\n${agents.map(formatAgent).join('\n')}`;
+}
+
 export async function call(onDone: LocalJSXCommandOnDone, context: ToolUseContext): Promise<React.ReactNode> {
   const appState = context.getAppState();
+  if (context.options.isNonInteractiveSession) {
+    onDone(formatAgentsList(appState.agentDefinitions.activeAgents), { display: 'system' });
+    return null;
+  }
+
   const permissionContext = appState.toolPermissionContext;
   const tools = getTools(permissionContext);
   return <AgentsMenu tools={tools} onExit={onDone} />;

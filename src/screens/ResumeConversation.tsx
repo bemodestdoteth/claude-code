@@ -200,11 +200,12 @@ export function ResumeConversation({
         if (warning) {
           /* eslint-disable @typescript-eslint/no-require-imports */
           const {
+            clearAgentDefinitionsCache,
             getAgentDefinitionsWithOverrides,
             getActiveAgentsFromList
           } = require('../tools/AgentTool/loadAgentsDir.js') as typeof import('../tools/AgentTool/loadAgentsDir.js');
           /* eslint-enable @typescript-eslint/no-require-imports */
-          getAgentDefinitionsWithOverrides.cache.clear?.();
+          clearAgentDefinitionsCache();
           const freshAgentDefs = await getAgentDefinitionsWithOverrides(getOriginalCwd());
           setAppState(prev_0 => ({
             ...prev_0,

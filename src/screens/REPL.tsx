@@ -2,6 +2,7 @@ import { c as _c } from "react/compiler-runtime";
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import { feature } from 'bun:bundle';
 import { spawnSync } from 'child_process';
+import { appendFileSync } from 'fs';
 import { snapshotOutputTokensForTurn, getCurrentTurnTokenBudget, getTurnOutputTokens, getBudgetContinuationCount, getTotalInputTokens } from '../bootstrap/state.js';
 import { parseTokenBudget } from '../utils/tokenBudget.js';
 import { count } from '../utils/array.js';
@@ -148,6 +149,7 @@ import { TeammateViewHeader } from '../components/TeammateViewHeader.js';
 import { useTasksV2WithCollapseEffect } from '../hooks/useTasksV2.js';
 import { maybeMarkProjectOnboardingComplete } from '../projectOnboardingState.js';
 import type { MCPServerConnection } from '../services/mcp/types.js';
+import { getChannelProgressSender, type ChannelProgressParams } from '../services/mcp/channelNotification.js';
 import type { ScopedMcpServerConfig } from '../services/mcp/types.js';
 import { randomUUID, type UUID } from 'crypto';
 import { processSessionStartHooks } from '../utils/sessionStart.js';
@@ -279,6 +281,104 @@ import { createAttachmentMessage, getQueuedCommandAttachments } from '../utils/a
 // creating a new [] literal on every render in remote mode, which would
 // cause useEffect dependency changes and infinite re-render loops.
 const EMPTY_MCP_CLIENTS: MCPServerConnection[] = [];
+
+type ChannelTurnProgress = {
+  server: string
+  params: Omit<ChannelProgressParams, 'status' | 'message'>
+  lastSentAt: number
+  lastMessage?: string
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+const CHANNEL_HOOK_PROGRESS_MAX_WIDTH = 120
+
+function sanitizeChannelProgressText(value: string): string {
+  return truncateToWidth(
+    value
+      .replace(/\b(authorization)(\s*[:=]\s*)(?:bearer|basic|token)?\s*\S+/gi, '$1$2[redacted]')
+      .replace(/([A-Za-z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD)[A-Za-z0-9_]*)(\s*=\s*)\S+/gi, '$1$2[redacted]')
+      .replace(/\b(x-api-key|api[_-]?key|token|secret|password)(\s*[:=]\s*)\S+/gi, '$1$2[redacted]')
+      .replace(/\s+/g, ' ')
+      .trim(),
+    CHANNEL_HOOK_PROGRESS_MAX_WIDTH,
+  )
+}
+
+function getHookCommandLabel(command: string): string {
+  const firstWord = command.trim().match(/^["']?([^\s"']+)/)?.[1]
+  if (!firstWord) return 'command'
+  return truncateToWidth(firstWord.split(/[\\/]/).at(-1) ?? 'command', 40)
+}
+
+function getChannelTurnProgress(messages: MessageType[], agentType?: string): ChannelTurnProgress | undefined {
+  const origin = messages.findLast(m => m.type === 'user' && m.origin?.kind === 'channel')?.origin
+  if (origin?.kind !== 'channel') return undefined
+  const server = asNonEmptyString(origin.server)
+  if (!server) return undefined
+  const meta = typeof origin.meta === 'object' && origin.meta !== null ? origin.meta as Record<string, unknown> : {}
+  const params: Omit<ChannelProgressParams, 'status' | 'message'> = {
+    chat_id: asNonEmptyString(meta.chat_id),
+    user_id: asNonEmptyString(meta.user_id),
+    message_id: asNonEmptyString(meta.message_id),
+    workspace: asNonEmptyString(meta.workspace),
+    _meta: agentType ? { 'claudecode/agentType': agentType } : undefined,
+  }
+  return { server, params, lastSentAt: 0 }
+}
+
+function getLocalCommandOutputText(messages: MessageType[]): string | undefined {
+  const message = messages.findLast(
+    m =>
+      (m.type === 'system' && m.subtype === 'local_command') ||
+      m.type === 'user',
+  )
+  if (!message || typeof message.content !== 'string') return undefined
+  const match = message.content.match(
+    /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/,
+  )
+  const text = match?.[1]?.trim()
+  return text || undefined
+}
+
+function getProgressMessage(message: MessageType): { message: string; agentType?: string } | undefined {
+  if (message.type !== 'progress') return undefined
+  const data = 'data' in message && typeof message.data === 'object' && message.data !== null ? message.data as Record<string, unknown> : undefined
+  if (!data) return undefined
+  if (data.type === 'mcp_progress') {
+    const toolName = asNonEmptyString(data.toolName) ?? 'MCP tool'
+    const status = asNonEmptyString(data.status)
+    if (status === 'started') return { message: `Using ${toolName}…` }
+    if (status === 'completed') return { message: `Completed ${toolName}` }
+    if (status === 'failed') return { message: `${toolName} failed` }
+  }
+  if (data.type === 'skill_progress') {
+    const commandName = asNonEmptyString(data.commandName) ?? 'skill'
+    const status = asNonEmptyString(data.status)
+    return { message: status ? `${commandName}: ${status}` : `Running ${commandName}…` }
+  }
+  if (data.type === 'agent_progress') {
+    const agentType = asNonEmptyString(data.agentType)
+    const agentName = asNonEmptyString(data.agentName) ?? agentType ?? 'agent'
+    const status = asNonEmptyString(data.status)
+    return { message: status ? `${agentName}: ${status}` : `Running ${agentName}…`, agentType }
+  }
+  if (data.type === 'hook_progress') {
+    const statusMessage = asNonEmptyString(data.statusMessage)
+    if (statusMessage) return { message: sanitizeChannelProgressText(statusMessage) }
+    const promptText = asNonEmptyString(data.promptText)
+    if (promptText) return { message: `Running hook: ${sanitizeChannelProgressText(promptText)}` }
+    const command = asNonEmptyString(data.command)
+    if (command) return { message: `Running hook command: ${getHookCommandLabel(command)}` }
+    const hookEvent = asNonEmptyString(data.hookEvent) ?? 'hook'
+    return { message: `Running ${hookEvent} hook…` }
+  }
+  return undefined
+}
+
+const CHANNEL_PROGRESS_THROTTLE_MS = 5000
 
 // Stable stub for useAssistantHistory's non-KAIROS branch — avoids a new
 // function identity each render, which would break composedOnScroll's memo.
@@ -1202,6 +1302,46 @@ export function REPL({
   }, [setToolUseConfirmQueue]);
   const [messages, rawSetMessages] = useState<MessageType[]>(initialMessages ?? []);
   const messagesRef = useRef(messages);
+  const uiMemoryProbeEnabled = process.env.CLAUDE_CODE_MEMORY_PROBE === '1';
+  const uiMemoryProbePath = `/tmp/claude-ui-memory-${process.pid}.log`;
+  const estimateBytes = (value: unknown): number => {
+    try {
+      return JSON.stringify(value).length;
+    } catch {
+      return 0;
+    }
+  };
+  const logUiMemoryProbe = (messagesToMeasure: MessageType[]): void => {
+    if (!uiMemoryProbeEnabled) return;
+    const values: Record<string, number> = {
+      messages: messagesToMeasure.length,
+      messageBytes: 0,
+      contentBytes: 0,
+      toolUseResultBytes: 0,
+      largestMessageBytes: 0,
+      largestToolUseResultBytes: 0
+    };
+    for (const message of messagesToMeasure) {
+      const messageBytes = estimateBytes(message);
+      const toolUseResultBytes = 'toolUseResult' in message ? estimateBytes(message.toolUseResult) : 0;
+      const contentBytes = 'message' in message ? estimateBytes(message.message) : 0;
+      values.messageBytes += messageBytes;
+      values.contentBytes += contentBytes;
+      values.toolUseResultBytes += toolUseResultBytes;
+      values.largestMessageBytes = Math.max(values.largestMessageBytes, messageBytes);
+      values.largestToolUseResultBytes = Math.max(values.largestToolUseResultBytes, toolUseResultBytes);
+      values[`count:${message.type}`] = (values[`count:${message.type}`] ?? 0) + 1;
+      values[`bytes:${message.type}`] = (values[`bytes:${message.type}`] ?? 0) + messageBytes;
+    }
+    const memory = process.memoryUsage();
+    appendFileSync(uiMemoryProbePath, `${JSON.stringify({
+      ts: Date.now(),
+      rss: memory.rss,
+      heapUsed: memory.heapUsed,
+      heapTotal: memory.heapTotal,
+      ...values
+    })}\n`);
+  };
   // Stores the willowMode variant that was shown (or false if no hint shown).
   // Captured at hint_shown time so hint_converted telemetry reports the same
   // variant — the GrowthBook value shouldn't change mid-session, but reading
@@ -1220,6 +1360,7 @@ export function REPL({
     const prev = messagesRef.current;
     const next = typeof action === 'function' ? action(messagesRef.current) : action;
     messagesRef.current = next;
+    logUiMemoryProbe(next);
     if (next.length < userInputBaselineRef.current) {
       // Shrank (compact/rewind/clear) — clamp so placeholderText's length
       // check can't go stale.
@@ -1737,11 +1878,12 @@ export function REPL({
           // reflect the new coordinator/normal mode
           /* eslint-disable @typescript-eslint/no-require-imports */
           const {
+            clearAgentDefinitionsCache,
             getAgentDefinitionsWithOverrides,
             getActiveAgentsFromList
           } = require('../tools/AgentTool/loadAgentsDir.js') as typeof import('../tools/AgentTool/loadAgentsDir.js');
           /* eslint-enable @typescript-eslint/no-require-imports */
-          getAgentDefinitionsWithOverrides.cache.clear?.();
+          clearAgentDefinitionsCache();
           const freshAgentDefs = await getAgentDefinitionsWithOverrides(getOriginalCwd());
           setAppState(prev => ({
             ...prev,
@@ -2562,8 +2704,31 @@ export function REPL({
     setAbortController,
     onBackgroundQuery: handleBackgroundQuery
   });
+  const activeChannelProgressRef = useRef<ChannelTurnProgress | null>(null);
+  const sendChannelProgress = useCallback((status: ChannelProgressParams['status'], message: string, force = false, agentType?: string) => {
+    const turn = activeChannelProgressRef.current;
+    if (!turn) return;
+    const now = Date.now();
+    if (!force && (message === turn.lastMessage || now - turn.lastSentAt < CHANNEL_PROGRESS_THROTTLE_MS)) return;
+    const sender = getChannelProgressSender(turn.server);
+    if (!sender) return;
+    turn.lastSentAt = now;
+    turn.lastMessage = message;
+    void sender({
+      ...turn.params,
+      ...(agentType ? { _meta: { ...turn.params._meta, 'claudecode/agentType': agentType } } : {}),
+      status,
+      message,
+    }).catch(error => {
+      logForDebugging(`Channel progress update failed for ${turn.server}: ${error instanceof Error ? error.message : String(error)}`, {
+        level: 'error'
+      });
+    });
+  }, []);
   const onQueryEvent = useCallback((event: Parameters<typeof handleMessageFromStream>[0]) => {
     handleMessageFromStream(event, newMessage => {
+      const progressMessage = getProgressMessage(newMessage);
+      if (progressMessage) sendChannelProgress('progress', progressMessage.message, false, progressMessage.agentType);
       if (isCompactBoundaryMessage(newMessage)) {
         // Fullscreen: keep pre-compact messages for scrollback. query.ts
         // slices at the boundary for API calls, Messages.tsx skips the
@@ -2638,7 +2803,7 @@ export function REPL({
         endResponseLength: baseline
       });
     }, onStreamingText);
-  }, [setMessages, setResponseLength, setStreamMode, setStreamingToolUses, setStreamingThinking, onStreamingText]);
+  }, [setMessages, setResponseLength, setStreamMode, setStreamingToolUses, setStreamingThinking, onStreamingText, sendChannelProgress]);
   const onQueryImpl = useCallback(async (messagesIncludingNewMessages: MessageType[], newMessages: MessageType[], abortController: AbortController, shouldQuery: boolean, additionalAllowedTools: string[], mainLoopModelParam: string, effort?: EffortValue) => {
     // Prepare IDE integration for new prompt. Read mcpClients fresh from
     // store — useManageMCPConnections may have populated it since the
@@ -2708,7 +2873,11 @@ export function REPL({
 
     // The last message is an assistant message if the user input was a bash command,
     // or if the user input was an invalid slash command.
+    activeChannelProgressRef.current = getChannelTurnProgress(newMessages, mainThreadAgentDefinition?.agentType) ?? getChannelTurnProgress(messagesIncludingNewMessages, mainThreadAgentDefinition?.agentType) ?? null;
     if (!shouldQuery) {
+      const outputText = getLocalCommandOutputText(newMessages)
+      if (outputText) sendChannelProgress('done', outputText, true)
+      activeChannelProgressRef.current = null
       // Manual /compact sets messages directly (shouldQuery=false) bypassing
       // handleMessageFromStream. Clear context-blocked if a compact boundary
       // is present so proactive ticks resume after compaction.
@@ -2771,16 +2940,25 @@ export function REPL({
     resetTurnHookDuration();
     resetTurnToolDuration();
     resetTurnClassifierDuration();
-    for await (const event of query({
-      messages: messagesIncludingNewMessages,
-      systemPrompt,
-      userContext,
-      systemContext,
-      canUseTool,
-      toolUseContext,
-      querySource: getQuerySourceForREPL()
-    })) {
-      onQueryEvent(event);
+    sendChannelProgress('started', 'Working…', true);
+    try {
+      for await (const event of query({
+        messages: messagesIncludingNewMessages,
+        systemPrompt,
+        userContext,
+        systemContext,
+        canUseTool,
+        toolUseContext,
+        querySource: getQuerySourceForREPL()
+      })) {
+        onQueryEvent(event);
+      }
+      sendChannelProgress('done', 'Done', true);
+    } catch (error) {
+      sendChannelProgress('error', 'Stopped with an error', true);
+      throw error;
+    } finally {
+      activeChannelProgressRef.current = null;
     }
     if (feature('BUDDY')) {
       void fireCompanionObserver(messagesRef.current, reaction => setAppState(prev => prev.companionReaction === reaction ? prev : {

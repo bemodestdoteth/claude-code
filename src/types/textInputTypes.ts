@@ -348,6 +348,13 @@ export type QueuedCommand = {
    */
   workload?: string
   /**
+   * Validated working directory for a channel-origin command. Undefined means
+   * use the session cwd.
+   */
+  cwd?: string
+  /** Alias that resolved to cwd, for diagnostics and batching boundaries. */
+  workspace?: string
+  /**
    * Agent that should receive this notification. Undefined = main thread.
    * Subagents run in-process and share the module-level command queue; the
    * drain gate in query.ts filters by this field so a subagent's background

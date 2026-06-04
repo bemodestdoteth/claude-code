@@ -25,6 +25,7 @@ import {
   setYoloClassifierApproval,
 } from '../../../utils/classifierApprovals.js'
 import { errorMessage } from '../../../utils/errors.js'
+import type { MessageOrigin } from '../../../types/message.js'
 import type { PermissionDecision } from '../../../utils/permissions/PermissionResult.js'
 import type { PermissionUpdate } from '../../../utils/permissions/PermissionUpdateSchema.js'
 import { hasPermissionsToUseTool } from '../../../utils/permissions/permissions.js'
@@ -38,6 +39,35 @@ type InteractivePermissionParams = {
   awaitAutomatedChecksBeforeDialog: boolean | undefined
   bridgeCallbacks?: BridgePermissionCallbacks
   channelCallbacks?: ChannelPermissionCallbacks
+}
+
+type ChannelOriginMeta = {
+  chat_id?: string
+  user_id?: string
+  message_id?: string
+  workspace?: string
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function getChannelOriginMeta(origin: MessageOrigin | undefined): ChannelOriginMeta | undefined {
+  if (origin?.kind !== 'channel') return undefined
+  const meta = origin.meta
+  if (!meta || typeof meta !== 'object') return undefined
+  const record = meta as Record<string, unknown>
+  const channelMeta: ChannelOriginMeta = {
+    chat_id: asString(record.chat_id),
+    user_id: asString(record.user_id),
+    message_id: asString(record.message_id),
+    workspace: asString(record.workspace),
+  }
+  return Object.values(channelMeta).some(Boolean) ? channelMeta : undefined
+}
+
+function getCurrentTurnChannelOriginMeta(messages: PermissionContext['toolUseContext']['messages']): ChannelOriginMeta | undefined {
+  return getChannelOriginMeta(messages.at(-1)?.origin)
 }
 
 /**
@@ -331,11 +361,15 @@ function handleInteractivePermission(
       // rich text, Discord embed). CC sends the RAW parts; server composes.
       // The old callTool('send_message', {text,content,message}) triple-key
       // hack is gone — no more guessing which arg name each plugin takes.
+      const channelOriginMeta = getCurrentTurnChannelOriginMeta(
+        ctx.toolUseContext.messages,
+      )
       const params: ChannelPermissionRequestParams = {
         request_id: channelRequestId,
         tool_name: ctx.tool.name,
         description,
         input_preview: truncateForPreview(displayInput),
+        ...channelOriginMeta,
       }
 
       for (const client of channelClients) {

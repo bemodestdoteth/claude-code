@@ -306,6 +306,7 @@ const MAX_MESSAGES_TO_SHOW_IN_TRANSCRIPT_MODE = 30;
 // in-progress badge snapshots in scrollback.
 const MAX_MESSAGES_WITHOUT_VIRTUALIZATION = 200;
 const MESSAGE_CAP_STEP = 50;
+const MAX_MESSAGES_FOR_UI_TRANSFORMS = 1000;
 export type SliceAnchor = {
   uuid: string;
   idx: number;
@@ -376,7 +377,18 @@ const MessagesImpl = ({
     columns
   } = useTerminalSize();
   const toggleShowAllShortcut = useShortcutDisplay('transcript:toggleShowAll', 'Transcript', 'Ctrl+E');
-  const normalizedMessages = useMemo(() => normalizeMessages(messages).filter(isNotEmptyMessage), [messages]);
+  const isTranscriptMode = screen === 'transcript';
+  // Hoisted to mount-time — this component re-renders on every scroll.
+  const disableVirtualScroll = useMemo(() => isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_VIRTUAL_SCROLL), []);
+  // Virtual scroll replaces the transcript cap: everything is scrollable and
+  // memory is bounded by the mounted-item count, not the total. scrollRef is
+  // only passed when isFullscreenEnvEnabled() is true (REPL.tsx gates it),
+  // so scrollRef's presence is the signal.
+  const virtualScrollRuntimeGate = scrollRef != null && !disableVirtualScroll;
+  const shouldTruncate = isTranscriptMode && !showAllInTranscript && !virtualScrollRuntimeGate;
+  const shouldWindowUiTransforms = !isTranscriptMode && virtualScrollRuntimeGate && !disableRenderCap && messages.length > MAX_MESSAGES_FOR_UI_TRANSFORMS;
+  const messagesForUiTransforms = useMemo(() => shouldWindowUiTransforms ? messages.slice(-MAX_MESSAGES_FOR_UI_TRANSFORMS) : messages, [messages, shouldWindowUiTransforms]);
+  const normalizedMessages = useMemo(() => normalizeMessages(messagesForUiTransforms).filter(isNotEmptyMessage), [messagesForUiTransforms]);
 
   // Check if streaming thinking should be visible (streaming or within 30s timeout)
   const isStreamingThinkingVisible = useMemo(() => {
@@ -456,16 +468,6 @@ const MessagesImpl = ({
     msg_1.uuid = deriveUUID(streamingToolUse.contentBlock.id as UUID, 0);
     return normalizeMessages([msg_1]);
   }), [streamingToolUsesWithoutInProgress]);
-  const isTranscriptMode = screen === 'transcript';
-  // Hoisted to mount-time — this component re-renders on every scroll.
-  const disableVirtualScroll = useMemo(() => isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_VIRTUAL_SCROLL), []);
-  // Virtual scroll replaces the transcript cap: everything is scrollable and
-  // memory is bounded by the mounted-item count, not the total. scrollRef is
-  // only passed when isFullscreenEnvEnabled() is true (REPL.tsx gates it),
-  // so scrollRef's presence is the signal.
-  const virtualScrollRuntimeGate = scrollRef != null && !disableVirtualScroll;
-  const shouldTruncate = isTranscriptMode && !showAllInTranscript && !virtualScrollRuntimeGate;
-
   // Anchor for the first rendered message in the non-virtualized cap slice.
   // Monotonic advance only — mutation during render is idempotent (safe
   // under StrictMode double-render). See MAX_MESSAGES_WITHOUT_VIRTUALIZATION

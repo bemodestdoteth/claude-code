@@ -1,10 +1,4 @@
 import { c as _c } from "react/compiler-runtime";
-// Conditionally require()'d in LogoV2.tsx behind feature('KAIROS') ||
-// feature('KAIROS_CHANNELS'). No feature() guard here — the whole file
-// tree-shakes via the require pattern when both flags are false (see
-// docs/feature-gating.md). Do NOT import this module statically from
-// unguarded code.
-
 import * as React from 'react';
 import { useState } from 'react';
 import { type ChannelEntry, getAllowedChannels, getHasDevChannels } from '../../bootstrap/state.js';
@@ -16,7 +10,7 @@ import { getSubscriptionType } from '../../utils/auth.js';
 import { loadInstalledPluginsV2 } from '../../utils/plugins/installedPluginsManager.js';
 import { getSettingsForSource } from '../../utils/settings/settings.js';
 export function ChannelsNotice() {
-  const $ = _c(32);
+  const $ = _c(33);
   const [t0] = useState(_temp);
   const {
     channels,
@@ -97,13 +91,15 @@ export function ChannelsNotice() {
     }
     return t5;
   }
+  const allUnmatched = channels.every(c => unmatched.some(u => u.entry === c));
   let t1;
-  if ($[22] !== list) {
-    t1 = <Text color="error">Listening for channel messages from: {list}</Text>;
-    $[22] = list;
-    $[23] = t1;
+  if ($[22] !== allUnmatched || $[23] !== list) {
+    t1 = allUnmatched ? <Text color="warning">No requested channel entries can register ({list})</Text> : <Text color="error">Listening for channel messages from: {list}</Text>;
+    $[22] = allUnmatched;
+    $[23] = list;
+    $[32] = t1;
   } else {
-    t1 = $[23];
+    t1 = $[32];
   }
   let t2;
   if ($[24] !== flag) {

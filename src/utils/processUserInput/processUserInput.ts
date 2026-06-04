@@ -419,26 +419,56 @@ async function processUserInputBase(
   }
   queryCheckpoint('query_pasted_image_processing_end')
 
-  // Bridge-safe slash command override: mobile/web clients set bridgeOrigin
-  // with skipSlashCommands still true (defense-in-depth against exit words and
-  // immediate-command fast paths). Resolve the command here — if it passes
-  // isBridgeSafeCommand, clear the skip so the gate below opens. If it's a
-  // known-but-unsafe command (local-jsx UI or terminal-only), short-circuit
+  // Bridge-safe slash command override: remote bridge and channel clients set
+  // bridgeOrigin with skipSlashCommands still true (defense-in-depth against
+  // exit words and immediate-command fast paths). Resolve the command here — if
+  // it passes isBridgeSafeCommand, clear the skip so the gate below opens. If
+  // it's a known-but-unsafe command (local-jsx UI or terminal-only), short-circuit
   // with a helpful message rather than letting the model see raw "/config".
   let effectiveSkipSlash = skipSlashCommands
-  if (bridgeOrigin && inputString !== null && inputString.startsWith('/')) {
-    const parsed = parseSlashCommand(inputString)
-    const cmd = parsed
+  const remoteSlash = bridgeOrigin
+    ? getRemoteSlashCommandInput(inputString)
+    : null
+  const remoteSlashInput = remoteSlash?.input ?? null
+  if (remoteSlashInput !== null) {
+    const parsed = parseSlashCommand(remoteSlashInput)
+    const commandName = parsed?.commandName.toLowerCase()
+    const shouldLetChannelHandleCommandPreview =
+      remoteSlash?.fromChannel === true &&
+      (commandName === 'agents' ||
+        commandName === 'commands' ||
+        commandName === 'help')
+    const cmd = shouldLetChannelHandleCommandPreview
+      ? undefined
+      : parsed
       ? findCommand(parsed.commandName, context.options.commands)
       : undefined
     if (cmd) {
+      if (getCommandName(cmd) === 'agents' && !remoteSlash?.fromChannel) {
+        const { formatAgentsList } = await import(
+          '../../commands/agents/agents.js'
+        )
+        const msg = formatAgentsList(
+          context.getAppState().agentDefinitions.activeAgents,
+        )
+        return {
+          messages: [
+            createUserMessage({ content: inputString ?? remoteSlashInput, uuid }),
+            createCommandInputMessage(
+              `<local-command-stdout>${msg}</local-command-stdout>`,
+            ),
+          ],
+          shouldQuery: false,
+          resultText: msg,
+        }
+      }
       if (isBridgeSafeCommand(cmd)) {
         effectiveSkipSlash = false
       } else {
-        const msg = `/${getCommandName(cmd)} isn't available over Remote Control.`
+        const msg = `/${getCommandName(cmd)} isn't available from this remote client.`
         return {
           messages: [
-            createUserMessage({ content: inputString, uuid }),
+            createUserMessage({ content: inputString ?? remoteSlashInput, uuid }),
             createCommandInputMessage(
               `<local-command-stdout>${msg}</local-command-stdout>`,
             ),
@@ -450,6 +480,15 @@ async function processUserInputBase(
     }
     // Unknown /foo or unparseable — fall through to plain text, same as
     // pre-#19134. A mobile user typing "/shrug" shouldn't see "Unknown skill".
+  }
+
+  if (
+    remoteSlashInput !== null &&
+    remoteSlashInput !== inputString &&
+    !effectiveSkipSlash
+  ) {
+    inputString = remoteSlashInput
+    normalizedInput = remoteSlashInput
   }
 
   // Ultraplan keyword — route through /ultraplan. Detect on the
@@ -589,6 +628,23 @@ async function processUserInputBase(
 }
 
 // Adds image metadata texts as isMeta message to result
+function getRemoteSlashCommandInput(
+  input: string | null,
+): { input: string; fromChannel: boolean } | null {
+  if (input === null) return null
+  if (input.startsWith('/')) return { input, fromChannel: false }
+  if (!input.startsWith('<channel ')) return null
+  const channelClose = input.indexOf('</channel>')
+  if (channelClose === -1) return null
+  const channelOpenEnd = input.indexOf('>')
+  if (channelOpenEnd === -1 || channelOpenEnd > channelClose) return null
+  const content = input
+    .slice(channelOpenEnd + 1, channelClose)
+    .trim()
+    .replace(/^(?:<@!?\d+>\s*)+/, '')
+  return content.startsWith('/') ? { input: content, fromChannel: true } : null
+}
+
 function addImageMetadataMessage(
   result: ProcessUserInputBaseResult,
   imageMetadataTexts: string[],

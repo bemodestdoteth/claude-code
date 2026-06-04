@@ -76,10 +76,14 @@ import type {
   ScopedMcpServerConfig,
 } from 'src/services/mcp/types.js'
 import {
+  CHANNEL_ACK_METHOD,
+  CHANNEL_PROGRESS_METHOD,
+  ChannelDeliveryRequestSchema,
   ChannelMessageNotificationSchema,
   gateChannelServer,
   wrapChannelMessage,
   findChannelEntry,
+  registerChannelProgressSender,
 } from 'src/services/mcp/channelNotification.js'
 import {
   isChannelAllowlisted,
@@ -137,7 +141,10 @@ import { isPolicyAllowed } from 'src/services/policyLimits/index.js'
 import type { ReplBridgeHandle } from 'src/bridge/replBridge.js'
 import { getRemoteSessionUrl } from 'src/constants/product.js'
 import { buildBridgeConnectUrl } from 'src/bridge/bridgeStatusUtil.js'
-import { extractInboundMessageFields } from 'src/bridge/inboundMessages.js'
+import {
+  convertInboundContentForQueue,
+  extractInboundMessageFields,
+} from 'src/bridge/inboundMessages.js'
 import { resolveAndPrepend } from 'src/bridge/inboundAttachments.js'
 import type { CanUseToolFn } from 'src/hooks/useCanUseTool.js'
 import { hasPermissionsToUseTool } from 'src/utils/permissions/permissions.js'
@@ -3916,12 +3923,16 @@ function runHeadlessStreaming(
                   'src/bridge/initReplBridge.js'
                 )
                 const handle = await initReplBridge({
-                  onInboundMessage(msg) {
+                  async onInboundMessage(msg) {
                     const fields = extractInboundMessageFields(msg)
                     if (!fields) return
-                    const { content, uuid } = fields
+                    const { uuid } = fields
+                    const queuedContent = convertInboundContentForQueue(
+                      await resolveAndPrepend(msg, fields.content),
+                    )
                     enqueue({
-                      value: content,
+                      value: queuedContent.value,
+                      pastedContents: queuedContent.pastedContents,
                       mode: 'prompt' as const,
                       uuid,
                       skipSlashCommands: true,
@@ -4099,11 +4110,13 @@ function runHeadlessStreaming(
         trackReceivedMessageUuid(message.uuid)
       }
 
+      const queuedContent = convertInboundContentForQueue(
+        await resolveAndPrepend(message, message.message.content),
+      )
       enqueue({
         mode: 'prompt' as const,
-        // file_attachments rides the protobuf catchall from the web composer.
-        // Same-ref no-op when absent (no 'file_attachments' key).
-        value: await resolveAndPrepend(message, message.message.content),
+        value: queuedContent.value,
+        pastedContents: queuedContent.pastedContents,
         uuid: message.uuid,
         priority: message.priority,
       })
@@ -4671,10 +4684,6 @@ function handleChannelEnable(
       response: { subtype: 'error', request_id: requestId, error },
     })
 
-  if (!(feature('KAIROS') || feature('KAIROS_CHANNELS'))) {
-    return respondError('channels feature not available in this build')
-  }
-
   // Only a 'connected' client has .capabilities and .client to register the
   // handler on. The pool spread at the call site matches mcp_status.
   const connection = connectionPool.find(
@@ -4730,32 +4739,62 @@ function handleChannelEnable(
   // useManageMCPConnections. drainCommandQueue processes it between turns —
   // channel messages queue at priority 'next' and are seen by the model on
   // the turn after they arrive.
+  const enqueueChannelMessage = (
+    content: string,
+    meta: Record<string, string> | undefined,
+  ) => {
+    logMCPDebug(
+      serverName,
+      `notifications/claude/channel: ${content.slice(0, 80)}`,
+    )
+    logEvent('tengu_mcp_channel_message', {
+      content_length: content.length,
+      meta_key_count: Object.keys(meta ?? {}).length,
+      entry_kind:
+        'plugin' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+      is_dev: false,
+      plugin: pluginId,
+    })
+    enqueue({
+      mode: 'prompt',
+      value: wrapChannelMessage(serverName, content, meta),
+      priority: 'next',
+      isMeta: true,
+      origin: { kind: 'channel', server: serverName, meta },
+      skipSlashCommands: true,
+      bridgeOrigin: true,
+    })
+  }
+  connection.client.setRequestHandler(
+    ChannelDeliveryRequestSchema(),
+    async request => {
+      const { content, meta } = request.params
+      enqueueChannelMessage(content, meta)
+      return { status: 'accepted' }
+    },
+  )
   connection.client.setNotificationHandler(
     ChannelMessageNotificationSchema(),
     async notification => {
       const { content, meta } = notification.params
-      logMCPDebug(
-        serverName,
-        `notifications/claude/channel: ${content.slice(0, 80)}`,
-      )
-      logEvent('tengu_mcp_channel_message', {
-        content_length: content.length,
-        meta_key_count: Object.keys(meta ?? {}).length,
-        entry_kind:
-          'plugin' as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        is_dev: false,
-        plugin: pluginId,
-      })
-      enqueue({
-        mode: 'prompt',
-        value: wrapChannelMessage(serverName, content, meta),
-        priority: 'next',
-        isMeta: true,
-        origin: { kind: 'channel', server: serverName },
-        skipSlashCommands: true,
+      enqueueChannelMessage(content, meta)
+      await connection.client.notification({
+        method: CHANNEL_ACK_METHOD,
+        params: {
+          status: 'accepted',
+          delivery_id: meta?.delivery_id,
+          chat_id: meta?.chat_id,
+          message_id: meta?.message_id,
+        },
       })
     },
   )
+  registerChannelProgressSender(serverName, async params => {
+    await connection.client.notification({
+      method: CHANNEL_PROGRESS_METHOD,
+      params,
+    })
+  })
 
   output.enqueue({
     type: 'control_response',
@@ -4786,7 +4825,6 @@ function handleChannelEnable(
 function reregisterChannelHandlerAfterReconnect(
   connection: MCPServerConnection,
 ): void {
-  if (!(feature('KAIROS') || feature('KAIROS_CHANNELS'))) return
   if (connection.type !== 'connected') return
 
   const gate = gateChannelServer(
@@ -4806,32 +4844,62 @@ function reregisterChannelHandlerAfterReconnect(
     connection.name,
     'Channel notifications re-registered after reconnect',
   )
+  const enqueueChannelMessage = (
+    content: string,
+    meta: Record<string, string> | undefined,
+  ) => {
+    logMCPDebug(
+      connection.name,
+      `notifications/claude/channel: ${content.slice(0, 80)}`,
+    )
+    logEvent('tengu_mcp_channel_message', {
+      content_length: content.length,
+      meta_key_count: Object.keys(meta ?? {}).length,
+      entry_kind:
+        entry?.kind as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+      is_dev: entry?.dev ?? false,
+      plugin: pluginId,
+    })
+    enqueue({
+      mode: 'prompt',
+      value: wrapChannelMessage(connection.name, content, meta),
+      priority: 'next',
+      isMeta: true,
+      origin: { kind: 'channel', server: connection.name, meta },
+      skipSlashCommands: true,
+      bridgeOrigin: true,
+    })
+  }
+  connection.client.setRequestHandler(
+    ChannelDeliveryRequestSchema(),
+    async request => {
+      const { content, meta } = request.params
+      enqueueChannelMessage(content, meta)
+      return { status: 'accepted' }
+    },
+  )
   connection.client.setNotificationHandler(
     ChannelMessageNotificationSchema(),
     async notification => {
       const { content, meta } = notification.params
-      logMCPDebug(
-        connection.name,
-        `notifications/claude/channel: ${content.slice(0, 80)}`,
-      )
-      logEvent('tengu_mcp_channel_message', {
-        content_length: content.length,
-        meta_key_count: Object.keys(meta ?? {}).length,
-        entry_kind:
-          entry?.kind as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
-        is_dev: entry?.dev ?? false,
-        plugin: pluginId,
-      })
-      enqueue({
-        mode: 'prompt',
-        value: wrapChannelMessage(connection.name, content, meta),
-        priority: 'next',
-        isMeta: true,
-        origin: { kind: 'channel', server: connection.name },
-        skipSlashCommands: true,
+      enqueueChannelMessage(content, meta)
+      await connection.client.notification({
+        method: CHANNEL_ACK_METHOD,
+        params: {
+          status: 'accepted',
+          delivery_id: meta?.delivery_id,
+          chat_id: meta?.chat_id,
+          message_id: meta?.message_id,
+        },
       })
     },
   )
+  registerChannelProgressSender(connection.name, async params => {
+    await connection.client.notification({
+      method: CHANNEL_PROGRESS_METHOD,
+      params,
+    })
+  })
 }
 
 /**
@@ -4921,12 +4989,13 @@ async function loadInitialMessages(
             process.stderr.write(warning + '\n')
             // Refresh agent definitions to reflect the mode switch
             const {
+              clearAgentDefinitionsCache,
               getAgentDefinitionsWithOverrides,
               getActiveAgentsFromList,
             } =
               // eslint-disable-next-line @typescript-eslint/no-require-imports
               require('../tools/AgentTool/loadAgentsDir.js') as typeof import('../tools/AgentTool/loadAgentsDir.js')
-            getAgentDefinitionsWithOverrides.cache.clear?.()
+            clearAgentDefinitionsCache()
             const freshAgentDefs = await getAgentDefinitionsWithOverrides(
               getCwd(),
             )
@@ -5125,10 +5194,14 @@ async function loadInitialMessages(
         if (warning) {
           process.stderr.write(warning + '\n')
           // Refresh agent definitions to reflect the mode switch
-          const { getAgentDefinitionsWithOverrides, getActiveAgentsFromList } =
+          const {
+            clearAgentDefinitionsCache,
+            getAgentDefinitionsWithOverrides,
+            getActiveAgentsFromList,
+          } =
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             require('../tools/AgentTool/loadAgentsDir.js') as typeof import('../tools/AgentTool/loadAgentsDir.js')
-          getAgentDefinitionsWithOverrides.cache.clear?.()
+          clearAgentDefinitionsCache()
           const freshAgentDefs = await getAgentDefinitionsWithOverrides(
             getCwd(),
           )

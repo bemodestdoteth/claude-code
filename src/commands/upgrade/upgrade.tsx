@@ -5,8 +5,7 @@ import type { LocalJSXCommandOnDone } from '../../types/command.js';
 import { getClaudeAIOAuthTokens, isClaudeAISubscriber } from '../../utils/auth.js';
 import { openBrowser } from '../../utils/browser.js';
 import { logError } from '../../utils/log.js';
-import { Login } from '../login/login.js';
-export async function call(onDone: LocalJSXCommandOnDone, context: LocalJSXCommandContext): Promise<React.ReactNode | null> {
+export async function call(onDone: LocalJSXCommandOnDone, _context: LocalJSXCommandContext): Promise<React.ReactNode | null> {
   try {
     // Check if user is already on the highest Max plan (20x)
     if (isClaudeAISubscriber()) {
@@ -19,16 +18,14 @@ export async function call(onDone: LocalJSXCommandOnDone, context: LocalJSXComma
         isMax20x = profile?.organization?.organization_type === 'claude_max' && profile?.organization?.rate_limit_tier === 'default_claude_max_20x';
       }
       if (isMax20x) {
-        setTimeout(onDone, 0, 'You are already on the highest Max subscription plan. For additional usage, run /login to switch to an API usage-billed account.');
+        setTimeout(onDone, 0, 'You are already on the highest Max subscription plan. For additional usage, configure ANTHROPIC_API_KEY or apiKeyHelper to use an API usage-billed account.');
         return null;
       }
     }
     const url = 'https://claude.ai/upgrade/max';
     await openBrowser(url);
-    return <Login startingMessage={'Starting new login following /upgrade. Exit with Ctrl-C to use existing account.'} onDone={success => {
-      context.onChangeAPIKey();
-      onDone(success ? 'Login successful' : 'Login interrupted');
-    }} />;
+    setTimeout(onDone, 0, 'Opened Claude upgrade page. Configure ANTHROPIC_API_KEY or apiKeyHelper to use API usage billing.');
+    return null;
   } catch (error) {
     logError(error as Error);
     setTimeout(onDone, 0, 'Failed to open browser. Please visit https://claude.ai/upgrade/max to upgrade.');

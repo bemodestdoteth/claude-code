@@ -3,6 +3,7 @@ import type {
   ToolResultBlockParam,
   ToolUseBlock,
 } from '@anthropic-ai/sdk/resources/index.mjs'
+import { appendFileSync } from 'fs'
 import type { CanUseToolFn } from './hooks/useCanUseTool.js'
 import { FallbackTriggeredError } from './services/api/withRetry.js'
 import {
@@ -111,6 +112,120 @@ import {
 import { createBudgetTracker, checkTokenBudget } from './query/tokenBudget.js'
 import { count } from './utils/array.js'
 
+const queryMemoryProbeEnabled = process.env.CLAUDE_CODE_MEMORY_PROBE === '1'
+const queryMemoryProbePath = `/tmp/claude-query-memory-${process.pid}.log`
+
+function estimateMessageBytes(messages: Message[]): number {
+  let total = 0
+  for (const message of messages) {
+    try {
+      total += JSON.stringify(message).length
+    } catch {
+      total += 0
+    }
+  }
+  return total
+}
+
+function getMessageProbeCategory(message: Message): string {
+  if (message.type === 'attachment') return `attachment:${message.attachment.type}`
+  if (message.type === 'user' && Array.isArray(message.message.content)) {
+    const toolResultCount = message.message.content.filter(
+      block => block.type === 'tool_result',
+    ).length
+    if (toolResultCount > 0) return 'user:tool_result'
+  }
+  if (message.type === 'assistant' && Array.isArray(message.message.content)) {
+    const toolUseCount = message.message.content.filter(
+      block => block.type === 'tool_use',
+    ).length
+    if (toolUseCount > 0) return 'assistant:tool_use'
+  }
+  return message.type
+}
+
+function getMessageHistoryProbeBreakdown(
+  prefix: string,
+  messages: Message[],
+): Record<string, number> {
+  const values: Record<string, number> = {
+    [`${prefix}LargestMessageBytes`]: 0,
+    [`${prefix}ToolResultBlocks`]: 0,
+    [`${prefix}ToolResultBytes`]: 0,
+    [`${prefix}ToolResultLargestBlockBytes`]: 0,
+    [`${prefix}ToolResultOver50kBlocks`]: 0,
+    [`${prefix}ToolResultOver100kBlocks`]: 0,
+    [`${prefix}ToolResultBytesOver50kAggregate`]: 0,
+    [`${prefix}ToolResultBytesOver100kAggregate`]: 0,
+  }
+  for (const message of messages) {
+    const category = getMessageProbeCategory(message)
+    let bytes = 0
+    try {
+      bytes = JSON.stringify(message).length
+    } catch {
+      bytes = 0
+    }
+    values[`${prefix}Count:${category}`] =
+      (values[`${prefix}Count:${category}`] ?? 0) + 1
+    values[`${prefix}Bytes:${category}`] =
+      (values[`${prefix}Bytes:${category}`] ?? 0) + bytes
+    values[`${prefix}LargestMessageBytes`] = Math.max(
+      values[`${prefix}LargestMessageBytes`],
+      bytes,
+    )
+
+    if (message.type !== 'user' || !Array.isArray(message.message.content)) {
+      continue
+    }
+    for (const block of message.message.content) {
+      if (block.type !== 'tool_result' || !block.content) continue
+      let blockBytes = 0
+      try {
+        blockBytes = JSON.stringify(block.content).length
+      } catch {
+        blockBytes = 0
+      }
+      values[`${prefix}ToolResultBlocks`]++
+      values[`${prefix}ToolResultBytes`] += blockBytes
+      values[`${prefix}ToolResultLargestBlockBytes`] = Math.max(
+        values[`${prefix}ToolResultLargestBlockBytes`],
+        blockBytes,
+      )
+      if (blockBytes > 50_000) values[`${prefix}ToolResultOver50kBlocks`]++
+      if (blockBytes > 100_000) values[`${prefix}ToolResultOver100kBlocks`]++
+    }
+  }
+  values[`${prefix}ToolResultBytesOver50kAggregate`] = Math.max(
+    0,
+    values[`${prefix}ToolResultBytes`] - 50_000,
+  )
+  values[`${prefix}ToolResultBytesOver100kAggregate`] = Math.max(
+    0,
+    values[`${prefix}ToolResultBytes`] - 100_000,
+  )
+  return values
+}
+
+function logQueryMemoryProbe(
+  label: string,
+  values: Record<string, number | string>,
+): void {
+  if (!queryMemoryProbeEnabled) return
+  const memory = process.memoryUsage()
+  appendFileSync(
+    queryMemoryProbePath,
+    `${JSON.stringify({
+      ts: Date.now(),
+      label,
+      rss: memory.rss,
+      heapUsed: memory.heapUsed,
+      heapTotal: memory.heapTotal,
+      ...values,
+    })}\n`,
+  )
+}
+
 /* eslint-disable @typescript-eslint/no-require-imports */
 const snipModule = feature('HISTORY_SNIP')
   ? (require('./services/compact/snipCompact.js') as typeof import('./services/compact/snipCompact.js'))
@@ -211,9 +326,64 @@ type State = {
   pendingToolUseSummary: Promise<ToolUseSummaryMessage | null> | undefined
   stopHookActive: boolean | undefined
   turnCount: number
+  channelReplyReminderSent: boolean
+  channelReplyReminderKey: string | undefined
+  channelReplyToolUsed: boolean
   // Why the previous iteration continued. Undefined on first iteration.
   // Lets tests assert recovery paths fired without inspecting message contents.
   transition: Continue | undefined
+}
+
+type ChannelReplyReminder = {
+  server: string
+  chatId?: string
+  messageId?: string
+}
+
+function getChannelReplyReminder(messages: Message[]): ChannelReplyReminder | undefined {
+  const origin = messages.findLast(m => m.type === 'user' && m.origin?.kind === 'channel')?.origin
+  if (origin?.kind !== 'channel') return undefined
+  const server = typeof origin.server === 'string' ? origin.server : undefined
+  if (!server) return undefined
+  const meta = typeof origin.meta === 'object' && origin.meta !== null ? origin.meta as Record<string, unknown> : {}
+  return {
+    server,
+    chatId: typeof meta.chat_id === 'string' ? meta.chat_id : undefined,
+    messageId: typeof meta.message_id === 'string' ? meta.message_id : undefined,
+  }
+}
+
+function getChannelReplyReminderKey(reminder: ChannelReplyReminder | undefined): string | undefined {
+  if (!reminder) return undefined
+  return `${reminder.server}\u0000${reminder.chatId ?? ''}\u0000${reminder.messageId ?? ''}`
+}
+
+function hasAssistantText(message: AssistantMessage | undefined): boolean {
+  const content = message?.message?.content
+  return Array.isArray(content) && content.some(block => block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0)
+}
+
+function hasChannelReplyToolUse(
+  assistantMessages: AssistantMessage[],
+  reminder: ChannelReplyReminder,
+  toolUseContext: ToolUseContext,
+): boolean {
+  return assistantMessages.some(message =>
+    message.message.content.some(block => {
+      if (block.type !== 'tool_use') return false
+      const tool = findToolByName(toolUseContext.options.tools, block.name)
+      return tool?.mcpInfo?.serverName === reminder.server && tool.mcpInfo.toolName === 'reply'
+    }),
+  )
+}
+
+function createChannelReplyReminderMessage(reminder: ChannelReplyReminder): UserMessage {
+  const target = reminder.chatId ? `chat_id: ${reminder.chatId}` : `server: ${reminder.server}`
+  const replyTo = reminder.messageId ? ` If replying to that specific message, use reply_to: ${reminder.messageId}.` : ''
+  return createUserMessage({
+    content: `Your last response was plain transcript text, so the ${reminder.server} sender cannot see it. Call that channel's reply tool now using ${target}.${replyTo} Do not repeat the answer as plain text only.`,
+    isMeta: true,
+  })
 }
 
 export async function* query(
@@ -275,6 +445,9 @@ async function* queryLoop(
     hasAttemptedReactiveCompact: false,
     turnCount: 1,
     pendingToolUseSummary: undefined,
+    channelReplyReminderSent: false,
+    channelReplyReminderKey: undefined,
+    channelReplyToolUsed: false,
     transition: undefined,
   }
   const budgetTracker = feature('TOKEN_BUDGET') ? createBudgetTracker() : null
@@ -318,7 +491,11 @@ async function* queryLoop(
       pendingToolUseSummary,
       stopHookActive,
       turnCount,
+      channelReplyReminderSent,
+      channelReplyReminderKey,
+      channelReplyToolUsed,
     } = state
+    let nextChannelReplyToolUsed = channelReplyToolUsed
 
     // Skill discovery prefetch — per-iteration (uses findWritePivot guard
     // that returns early on non-write iterations). Discovery runs while the
@@ -998,8 +1175,17 @@ async function* queryLoop(
 
     // Execute post-sampling hooks after model response is complete
     if (assistantMessages.length > 0) {
+      logQueryMemoryProbe('post_sampling_hooks_clone', {
+        messagesForQuery: messagesForQuery.length,
+        assistantMessages: assistantMessages.length,
+        cloneLength: messagesForQuery.length + assistantMessages.length,
+        messagesForQueryBytes: estimateMessageBytes(messagesForQuery),
+        assistantMessageBytes: estimateMessageBytes(assistantMessages),
+        ...getMessageHistoryProbeBreakdown('messagesForQuery', messagesForQuery),
+      })
+      const messagesWithAssistant = [...messagesForQuery, ...assistantMessages]
       void executePostSamplingHooks(
-        [...messagesForQuery, ...assistantMessages],
+        messagesWithAssistant,
         systemPrompt,
         userContext,
         systemContext,
@@ -1106,6 +1292,9 @@ async function* queryLoop(
               pendingToolUseSummary: undefined,
               stopHookActive: undefined,
               turnCount,
+              channelReplyReminderSent,
+              channelReplyReminderKey,
+              channelReplyToolUsed,
               transition: {
                 reason: 'collapse_drain_retry',
                 committed: drained.committed,
@@ -1159,6 +1348,9 @@ async function* queryLoop(
             pendingToolUseSummary: undefined,
             stopHookActive: undefined,
             turnCount,
+            channelReplyReminderSent,
+            channelReplyReminderKey,
+            channelReplyToolUsed,
             transition: { reason: 'reactive_compact_retry' },
           }
           state = next
@@ -1214,6 +1406,9 @@ async function* queryLoop(
             pendingToolUseSummary: undefined,
             stopHookActive: undefined,
             turnCount,
+            channelReplyReminderSent,
+            channelReplyReminderKey,
+            channelReplyToolUsed,
             transition: { reason: 'max_output_tokens_escalate' },
           }
           state = next
@@ -1242,6 +1437,9 @@ async function* queryLoop(
             pendingToolUseSummary: undefined,
             stopHookActive: undefined,
             turnCount,
+            channelReplyReminderSent,
+            channelReplyReminderKey,
+            channelReplyToolUsed,
             transition: {
               reason: 'max_output_tokens_recovery',
               attempt: maxOutputTokensRecoveryCount + 1,
@@ -1262,6 +1460,43 @@ async function* queryLoop(
       if (lastMessage?.isApiErrorMessage) {
         void executeStopFailureHooks(lastMessage, toolUseContext)
         return { reason: 'completed' }
+      }
+
+      const channelReplyReminder = getChannelReplyReminder(messagesForQuery)
+      const currentChannelReplyReminderKey = getChannelReplyReminderKey(channelReplyReminder)
+      const currentChannelReplyToolUsed = channelReplyReminder
+        ? hasChannelReplyToolUse(assistantMessages, channelReplyReminder, toolUseContext)
+        : false
+      const isSameChannelReplyReminder = channelReplyReminderKey === currentChannelReplyReminderKey
+      const hasRepliedToChannel = isSameChannelReplyReminder && channelReplyToolUsed || currentChannelReplyToolUsed
+      nextChannelReplyToolUsed = hasRepliedToChannel
+      if (
+        channelReplyReminder &&
+        hasAssistantText(lastMessage) &&
+        !hasRepliedToChannel &&
+        !(isSameChannelReplyReminder && channelReplyReminderSent)
+      ) {
+        const next: State = {
+          messages: [
+            ...messagesForQuery,
+            ...assistantMessages,
+            createChannelReplyReminderMessage(channelReplyReminder),
+          ],
+          toolUseContext,
+          autoCompactTracking: tracking,
+          maxOutputTokensRecoveryCount,
+          hasAttemptedReactiveCompact,
+          maxOutputTokensOverride: undefined,
+          pendingToolUseSummary: undefined,
+          stopHookActive: undefined,
+          turnCount,
+          channelReplyReminderSent: true,
+          channelReplyReminderKey: currentChannelReplyReminderKey,
+          channelReplyToolUsed: false,
+          transition: { reason: 'channel_reply_reminder' },
+        }
+        state = next
+        continue
       }
 
       const stopHookResult = yield* handleStopHooks(
@@ -1299,6 +1534,9 @@ async function* queryLoop(
           pendingToolUseSummary: undefined,
           stopHookActive: true,
           turnCount,
+          channelReplyReminderSent,
+          channelReplyReminderKey,
+          channelReplyToolUsed,
           transition: { reason: 'stop_hook_blocking' },
         }
         state = next
@@ -1335,6 +1573,9 @@ async function* queryLoop(
             pendingToolUseSummary: undefined,
             stopHookActive: undefined,
             turnCount,
+            channelReplyReminderSent,
+            channelReplyReminderKey,
+            channelReplyToolUsed,
             transition: { reason: 'token_budget_continuation' },
           }
           continue
@@ -1577,12 +1818,29 @@ async function* queryLoop(
       return cmd.mode === 'task-notification' && cmd.agentId === currentAgentId
     })
 
+    logQueryMemoryProbe('attachment_messages_clone', {
+      messagesForQuery: messagesForQuery.length,
+      assistantMessages: assistantMessages.length,
+      toolResults: toolResults.length,
+      cloneLength:
+        messagesForQuery.length + assistantMessages.length + toolResults.length,
+      messagesForQueryBytes: estimateMessageBytes(messagesForQuery),
+      assistantMessageBytes: estimateMessageBytes(assistantMessages),
+      toolResultBytes: estimateMessageBytes(toolResults),
+      ...getMessageHistoryProbeBreakdown('messagesForQuery', messagesForQuery),
+    })
+
+    const attachmentMessagesInput = [
+      ...messagesForQuery,
+      ...assistantMessages,
+      ...toolResults,
+    ]
     for await (const attachment of getAttachmentMessages(
       null,
       updatedToolUseContext,
       null,
       queuedCommandsSnapshot,
-      [...messagesForQuery, ...assistantMessages, ...toolResults],
+      attachmentMessagesInput,
       querySource,
     )) {
       yield attachment
@@ -1678,6 +1936,12 @@ async function* queryLoop(
     // Each time we have tool results and are about to recurse, that's a turn
     const nextTurnCount = turnCount + 1
 
+    const nextMessages = [
+      ...messagesForQuery,
+      ...assistantMessages,
+      ...toolResults,
+    ]
+
     // Periodic task summary for `claude ps` — fires mid-turn so a
     // long-running agent still refreshes what it's working on. Gated
     // only on !agentId so every top-level conversation (REPL, SDK, HFI,
@@ -1687,16 +1951,23 @@ async function* queryLoop(
         !toolUseContext.agentId &&
         taskSummaryModule!.shouldGenerateTaskSummary()
       ) {
+        logQueryMemoryProbe('task_summary_clone', {
+          messagesForQuery: messagesForQuery.length,
+          assistantMessages: assistantMessages.length,
+          toolResults: toolResults.length,
+          cloneLength:
+            messagesForQuery.length + assistantMessages.length + toolResults.length,
+          messagesForQueryBytes: estimateMessageBytes(messagesForQuery),
+          assistantMessageBytes: estimateMessageBytes(assistantMessages),
+          toolResultBytes: estimateMessageBytes(toolResults),
+          ...getMessageHistoryProbeBreakdown('messagesForQuery', messagesForQuery),
+        })
         taskSummaryModule!.maybeGenerateTaskSummary({
           systemPrompt,
           userContext,
           systemContext,
           toolUseContext,
-          forkContextMessages: [
-            ...messagesForQuery,
-            ...assistantMessages,
-            ...toolResults,
-          ],
+          forkContextMessages: nextMessages,
         })
       }
     }
@@ -1711,9 +1982,23 @@ async function* queryLoop(
       return { reason: 'max_turns', turnCount: nextTurnCount }
     }
 
+    const nextChannelReplyReminderKey = getChannelReplyReminderKey(getChannelReplyReminder(nextMessages))
+    const nextChannelReplyReminderSent = channelReplyReminderKey === nextChannelReplyReminderKey && channelReplyReminderSent
+
     queryCheckpoint('query_recursive_call')
+    logQueryMemoryProbe('next_state_clone', {
+      messagesForQuery: messagesForQuery.length,
+      assistantMessages: assistantMessages.length,
+      toolResults: toolResults.length,
+      cloneLength:
+        messagesForQuery.length + assistantMessages.length + toolResults.length,
+      messagesForQueryBytes: estimateMessageBytes(messagesForQuery),
+      assistantMessageBytes: estimateMessageBytes(assistantMessages),
+      toolResultBytes: estimateMessageBytes(toolResults),
+      ...getMessageHistoryProbeBreakdown('messagesForQuery', messagesForQuery),
+    })
     const next: State = {
-      messages: [...messagesForQuery, ...assistantMessages, ...toolResults],
+      messages: nextMessages,
       toolUseContext: toolUseContextWithQueryTracking,
       autoCompactTracking: tracking,
       turnCount: nextTurnCount,
@@ -1722,6 +2007,9 @@ async function* queryLoop(
       pendingToolUseSummary: nextPendingToolUseSummary,
       maxOutputTokensOverride: undefined,
       stopHookActive,
+      channelReplyReminderSent: nextChannelReplyReminderSent,
+      channelReplyReminderKey: nextChannelReplyReminderKey,
+      channelReplyToolUsed: nextChannelReplyToolUsed,
       transition: { reason: 'next_turn' },
     }
     state = next

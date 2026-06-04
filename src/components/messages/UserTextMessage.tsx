@@ -235,29 +235,27 @@ export function UserTextMessage(t0) {
       return t2;
     }
   }
-  if (feature("KAIROS") || feature("KAIROS_CHANNELS")) {
-    if (param.text.includes("<channel source=\"")) {
-      let t1;
-      if ($[40] === Symbol.for("react.memo_cache_sentinel")) {
-        t1 = require("./UserChannelMessage.js");
-        $[40] = t1;
-      } else {
-        t1 = $[40];
-      }
-      const {
-        UserChannelMessage
-      } = t1 as typeof import('./UserChannelMessage.js');
-      let t2;
-      if ($[41] !== addMargin || $[42] !== param) {
-        t2 = <UserChannelMessage addMargin={addMargin} param={param} />;
-        $[41] = addMargin;
-        $[42] = param;
-        $[43] = t2;
-      } else {
-        t2 = $[43];
-      }
-      return t2;
+  if (param.text.includes("<channel source=\"")) {
+    let t1;
+    if ($[40] === Symbol.for("react.memo_cache_sentinel")) {
+      t1 = require("./UserChannelMessage.js");
+      $[40] = t1;
+    } else {
+      t1 = $[40];
     }
+    const {
+      UserChannelMessage
+    } = t1 as typeof import('./UserChannelMessage.js');
+    let t2;
+    if ($[41] !== addMargin || $[42] !== param) {
+      t2 = <UserChannelMessage addMargin={addMargin} param={param} />;
+      $[41] = addMargin;
+      $[42] = param;
+      $[43] = t2;
+    } else {
+      t2 = $[43];
+    }
+    return t2;
   }
   let t1;
   if ($[44] !== addMargin || $[45] !== isTranscriptMode || $[46] !== param || $[47] !== timestamp) {

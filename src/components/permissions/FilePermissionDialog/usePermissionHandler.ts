@@ -128,10 +128,9 @@ function handleAcceptSession(
     return
   }
 
-  // Generate permission updates if path is provided
-  const suggestions = path
-    ? generateSuggestions(path, operationType, toolPermissionContext)
-    : []
+  const suggestions =
+    toolUseConfirm.permissionResult.suggestions ??
+    (path ? generateSuggestions(path, operationType, toolPermissionContext) : [])
 
   onDone()
   // Pass permission updates directly to onAllow

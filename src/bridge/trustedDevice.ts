@@ -23,7 +23,7 @@ import { jsonStringify } from '../utils/slowOperations.js'
  * start flowing, server still no-ops), then flip server-side.
  *
  * Enrollment (POST /auth/trusted_devices) is gated server-side by
- * account_session.created_at < 10min, so it must happen during /login.
+ * account_session.created_at < 10min, so it must happen during fresh authentication.
  * Token is persistent (90d rolling expiry) and stored in keychain.
  *
  * See anthropics/anthropic#274559 (spec), #310375 (B1b tenant RPCs),
@@ -64,9 +64,9 @@ export function clearTrustedDeviceTokenCache(): void {
 
 /**
  * Clear the stored trusted device token from secure storage and the memo cache.
- * Called before enrollTrustedDevice() during /login so a stale token from the
+ * Called before enrollTrustedDevice() during fresh authentication so a stale token from the
  * previous account isn't sent as X-Trusted-Device-Token while enrollment is
- * in-flight (enrollTrustedDevice is async — bridge API calls between login and
+ * in-flight (enrollTrustedDevice is async — bridge API calls between auth change and
  * enrollment completion would otherwise still read the old cached token).
  */
 export function clearTrustedDeviceToken(): void {
@@ -92,7 +92,7 @@ export function clearTrustedDeviceToken(): void {
  * (post-login hooks) don't block the login flow.
  *
  * The server gates enrollment on account_session.created_at < 10min, so
- * this must be called immediately after a fresh /login. Calling it later
+ * this must be called immediately after fresh authentication. Calling it later
  * (e.g. lazy enrollment on /bridge 403) will fail with 403 stale_session.
  */
 export async function enrollTrustedDevice(): Promise<void> {
@@ -117,7 +117,7 @@ export async function enrollTrustedDevice(): Promise<void> {
     }
     // Lazy require — utils/auth.ts transitively pulls ~1300 modules
     // (config → file → permissions → sessionStorage → commands). Daemon callers
-    // of getTrustedDeviceToken() don't need this; only /login does.
+    // of getTrustedDeviceToken() don't need this; only enrollment does.
     /* eslint-disable @typescript-eslint/no-require-imports */
     const { getClaudeAIOAuthTokens } =
       require('../utils/auth.js') as typeof import('../utils/auth.js')
@@ -127,7 +127,7 @@ export async function enrollTrustedDevice(): Promise<void> {
       logForDebugging('[trusted-device] No OAuth token, skipping enrollment')
       return
     }
-    // Always re-enroll on /login — the existing token may belong to a
+    // Always re-enroll after fresh authentication — the existing token may belong to a
     // different account (account-switch without /logout). Skipping enrollment
     // would send the old account's token on the new account's bridge calls.
     const secureStorage = getSecureStorage()

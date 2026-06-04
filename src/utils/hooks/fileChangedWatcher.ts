@@ -1,5 +1,5 @@
 import chokidar, { type FSWatcher } from 'chokidar'
-import { isAbsolute, join } from 'path'
+import { isAbsolute, normalize, sep } from 'path'
 import { registerCleanup } from '../cleanupRegistry.js'
 import { logForDebugging } from '../debug.js'
 import { errorMessage } from '../errors.js'
@@ -17,6 +17,7 @@ let dynamicWatchPaths: string[] = []
 let dynamicWatchPathsSorted: string[] = []
 let initialized = false
 let hasEnvHooks = false
+let restartQueue = Promise.resolve()
 let notifyCallback: ((text: string, isError: boolean) => void) | null = null
 
 export function setEnvHookNotifier(
@@ -45,6 +46,15 @@ export function initializeFileChangedWatcher(cwd: string): void {
   startWatching(paths)
 }
 
+function resolveWatchPath(name: string): string {
+  if (isAbsolute(name)) return normalize(name)
+  const normalized = normalize(name)
+  if (normalized === '..' || normalized.startsWith(`..${sep}`)) {
+    throw new Error(`Invalid FileChanged matcher path: ${name}`)
+  }
+  return `${currentCwd}${sep}${normalized}`
+}
+
 function resolveWatchPaths(
   config?: ReturnType<typeof getHooksConfigFromSnapshot>,
 ): string[] {
@@ -56,7 +66,7 @@ function resolveWatchPaths(
     if (!m.matcher) continue
     for (const name of m.matcher.split('|').map(s => s.trim())) {
       if (!name) continue
-      staticPaths.push(isAbsolute(name) ? name : join(currentCwd, name))
+      staticPaths.push(resolveWatchPath(name))
     }
   }
 
@@ -116,16 +126,28 @@ export function updateWatchPaths(paths: string[]): void {
   }
   dynamicWatchPaths = paths
   dynamicWatchPathsSorted = sorted
-  restartWatching()
+  void queueRestartWatching()
 }
 
-function restartWatching(): void {
-  if (watcher) {
-    void watcher.close()
-    watcher = null
+function queueRestartWatching(): Promise<void> {
+  restartQueue = restartQueue
+    .catch(error => {
+      logForDebugging(`Previous FileChanged watcher restart failed: ${error}`, {
+        level: 'error',
+      })
+    })
+    .then(restartWatching)
+  return restartQueue
+}
+
+async function restartWatching(): Promise<void> {
+  const currentWatcher = watcher
+  watcher = null
+  if (currentWatcher) {
+    await currentWatcher.close()
   }
   const paths = resolveWatchPaths()
-  if (paths.length > 0) {
+  if (paths.length > 0 && initialized) {
     startWatching(paths)
   }
 }
@@ -170,22 +192,24 @@ export async function onCwdChangedForHooks(
 
   // Re-resolve matcher paths against the new cwd
   if (initialized) {
-    restartWatching()
+    await queueRestartWatching()
   }
 }
 
-function dispose(): void {
-  if (watcher) {
-    void watcher.close()
-    watcher = null
+async function dispose(): Promise<void> {
+  const currentWatcher = watcher
+  watcher = null
+  if (currentWatcher) {
+    await currentWatcher.close()
   }
   dynamicWatchPaths = []
   dynamicWatchPathsSorted = []
   initialized = false
   hasEnvHooks = false
+  restartQueue = Promise.resolve()
   notifyCallback = null
 }
 
-export function resetFileChangedWatcherForTesting(): void {
-  dispose()
+export async function resetFileChangedWatcherForTesting(): Promise<void> {
+  await dispose()
 }

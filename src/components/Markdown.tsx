@@ -4,6 +4,7 @@ import React, { Suspense, use, useMemo, useRef } from 'react';
 import { useSettings } from '../hooks/useSettings.js';
 import { Ansi, Box, useTheme } from '../ink.js';
 import { type CliHighlight, getCliHighlightPromise } from '../utils/cliHighlight.js';
+import { registerCache } from '../utils/cacheRegistry.js';
 import { hashContent } from '../utils/hash.js';
 import { configureMarked, formatToken } from '../utils/markdown.js';
 import { stripPromptXMLTags } from '../utils/messages.js';
@@ -21,6 +22,7 @@ type Props = {
 // retaining full content strings (turn50→turn99 RSS regression, #24180).
 const TOKEN_CACHE_MAX = 500;
 const tokenCache = new Map<string, Token[]>();
+registerCache('markdown-token-cache', () => tokenCache.clear());
 
 // Characters that indicate markdown syntax. If none are present, skip the
 // ~3ms marked.lexer call entirely — render as a single paragraph. Covers
